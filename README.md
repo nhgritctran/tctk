@@ -1,2 +1,2 @@
-# tctools
-Collection of my own mini tools.
+# tctk
+A mini tools collection.
