@@ -1,5 +1,5 @@
-hail
-tqdm
+dsub
 polars
 pyarrow
 setuptools
+tqdm

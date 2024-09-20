@@ -17,7 +17,7 @@ def scan_interval(locus, radius=10):
     return si
 
 
-def map_variant(mt, var_dict, snv=True):
+def find_variant(mt, var_dict, snv=True):
     """
     take a variant dict and scan input matrix table for these variants
     :param mt: Hail matrix table
