@@ -31,6 +31,7 @@ class dsub:
         provider="google-cls-v2",
         preemptible=False,
     ):
+        # Standard attributes
         self.docker_image = docker_image
         self.job_script_name = job_script_name
         self.input_files_dict = input_files_dict
@@ -52,16 +53,22 @@ class dsub:
         self.provider = provider
         self.preemptible = preemptible
 
+        # Internal attributes for optional naming conventions
         self.date = datetime.date.today().strftime("%Y%m%d")
         self.time = datetime.datetime.now().strftime("%H%M%S")
 
+        # output folder
         if output_folder is not None:
             self.output_folder = output_folder
         else:
             self.output_folder = (
                 f"{self.bucket}/dsub/results/{self.job_name}/{self.user_name}/{self.date}/{self.time}"
             )
+        self.phewas_output_file = (
+            f"/mnt/data/output/{self.output_folder.replace(':/', '')}/{self.output_file_name}"
+        )
 
+        # log file path
         if log_file_path is not None:
             self.log_file_path = log_file_path
         else:
@@ -69,14 +76,10 @@ class dsub:
                 f"{self.bucket}/dsub/logs/{self.job_name}/{self.user_name}/{self.date}/{self.time}/{self.job_name}.log"
             )
 
+        # some reporting attributes
         self.script = ""
         self.dsub_command = ""
         self.job_id = ""
-
-        self.phewas_output_file = (
-            f"/mnt/data/output/{self.output_folder.replace(':/', '')}/{self.output_file_name}"
-        )
-
         self.job_stdout = self.log_file_path.replace(".log", "-stdout.log")
         self.job_stderr = self.log_file_path.replace(".log", "-stderr.log")
 
@@ -102,11 +105,13 @@ class dsub:
             f"--env GOOGLE_PROJECT=\"{self.google_project}\"" + " "
         )
 
+        # generate input flags
         input_flags = ""
         if len(self.input_files_dict) > 0:
             for k, v in self.input_files_dict.items():
                 input_flags += f"--input {k}={v}" + " "
 
+        # generate output flag
         output_flag = ""
         if self.output_file_name != "":
             if self.multiple_output_files:
@@ -122,33 +127,59 @@ class dsub:
             print("output_file_name is required.")
             sys.exit(1)
 
+        # job script flag
         job_script = f"--script {self.job_script_name}"
 
+        # combined script
         script = base_script + input_flags + output_flag + job_script
 
+        # add preemptible flag if used
         if self.preemptible:
             script += " --preemptible"
 
+        # add attribute for convenience
         self.script = script
 
         return script
 
     def check_status(self, streaming=False):
+
+        # base command
         check_status = (
             f"dstat --provider {self.provider} --project {self.project} --location {self.region}"
             f" --jobs \"{self.job_id}\" --users \"{self.user_name}\" --status \"*\""
         )
+
+        # streaming status
         if streaming:
             check_status += " --wait --poll-interval 60"
+            process = subprocess.Popen(
+                [check_status],
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1,
+            )
+            try:
+                while True:
+                    output = process.stdout.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output:
+                        print(output.strip(), flush=True)
+            except KeyboardInterrupt:
+                process.kill()
+                sys.exit(0)
+        # full static status
         else:
             check_status += " --full"
-
-        subprocess.run([check_status], shell=True)
+            subprocess.run([check_status], shell=True)
 
     def view_log(self, log_type="stdout", n_lines=10):
-        tail = (
-            f" | head -n {n_lines}"
-        )
+
+        tail = f" | head -n {n_lines}"
+
         if log_type == "stdout":
             full_command = f"gsutil cat {self.job_stdout}" + tail
         elif log_type == "stderr":
@@ -158,9 +189,11 @@ class dsub:
         else:
             print("log_type must be 'stdout', 'stderr', or 'full'.")
             sys.exit(1)
+
         subprocess.run([full_command], shell=True)
 
     def kill(self):
+
         kill_job = (
             f"ddel --provider {self.provider} --project {self.project} --location {self.region}"
             f" --jobs \"{self.job_id}\" --users \"{self.user_name}\""
@@ -168,7 +201,9 @@ class dsub:
         subprocess.run([kill_job], shell=True)
 
     def run(self, show_command=False):
+
         s = subprocess.run([self._dsub_script()], shell=True, capture_output=True, text=True)
+
         if s.returncode == 0:
             print(f"Successfully run dsub to schedule job {self.job_name}.")
             self.job_id = s.stdout.strip()
