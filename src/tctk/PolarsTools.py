@@ -15,10 +15,11 @@ def spark_to_polars(spark_df):
     return polars_df
 
 
-def polars_gbq(query):
+def polars_gbq(query, remove_metadata=False):
     """
     Take a SQL query and return result as polars dataframe
     :param query: BigQuery SQL query
+    :param remove_metadata: remove metadata from bigquery dataframe, mainly to avoid Google custom datetime type issue
     :return: polars dataframe
     """
     client = bigquery.Client()
@@ -26,10 +27,11 @@ def polars_gbq(query):
     rows = query_job.result()
     table = rows.to_arrow()
     # this step is a walk-around for BigQuery custom date-time types
-    table = pa.Table.from_batches(
-        table.to_batches(),
-        schema=pa.schema([field.remove_metadata() for field in table.schema])
-    )
+    if remove_metadata:
+        table = pa.Table.from_batches(
+            table.to_batches(),
+            schema=pa.schema([field.remove_metadata() for field in table.schema])
+        )
     df = pl.from_arrow(table)
 
     return df
