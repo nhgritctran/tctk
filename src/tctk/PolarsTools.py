@@ -24,6 +24,12 @@ def polars_gbq(query):
     client = bigquery.Client()
     query_job = client.query(query)
     rows = query_job.result()
-    df = pl.from_arrow(rows.to_arrow())
+    table = rows.to_arrow()
+    # this step is a walk-around for BigQuery custom date-time types
+    table = pa.Table.from_batches(
+        table.to_batches(),
+        schema=pa.schema([field.remove_metadata() for field in table.schema])
+    )
+    df = pl.from_arrow(table)
 
     return df
