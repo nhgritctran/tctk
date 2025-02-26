@@ -354,7 +354,7 @@ class SocioEconomicStatus:
 
         return df
 
-    def parse_survey_data(self, smoking=False):
+    def parse_survey_data(self, smoking=False):  # smoking status will reduce the survey count, hence the option instead
         """
         get survey data of certain questions
         :param smoking: defaults to False; if true, data on smoking frequency is added
@@ -430,5 +430,7 @@ class SocioEconomicStatus:
                 "employment_answer": "employment status"
             }
         )
+        if smoking:
+            data = data.rename({"smoking_answer": "smoking status"})
 
         return data
