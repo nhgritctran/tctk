@@ -231,10 +231,13 @@ class SocioEconomicStatus:
         self.aou_ses = self.polar_gbq(f"SELECT * FROM {self.cdr}.ds_zip_code_socioeconomic")
 
         if not question_id_dict:
-            self.question_id_dict = {"own_or_rent": 1585370,
-                                     "education": 1585940,
-                                     "employment_status": 1585952,
-                                     "annual_household_income": 1585375}
+            self.question_id_dict = {
+                "own_or_rent": 1585370,
+                "education": 1585940,
+                "employment_status": 1585952,
+                "annual_household_income": 1585375,
+                "smoking_frequency": 1585860
+            }
 
         self.income_dict = {"Annual Income: less 10k": 1,
                             "Annual Income: 10k 25k": 2,
@@ -354,14 +357,12 @@ class SocioEconomicStatus:
 
         return df
 
-    def parse_survey_data(self, smoking=False):
+    def parse_survey_data(self):
         """
         get survey data of certain questions
-        :param smoking: defaults to False; if true, data on smoking frequency is added
         :return: polars dataframe with coded answers
         """
-        if smoking:
-            self.question_id_dict["smoking_frequency"] = 1585860
+
         question_ids = tuple(self.question_id_dict.values())
 
         survey_query = f"SELECT * FROM {self.cdr}.ds_survey WHERE question_concept_id IN {question_ids}"
@@ -405,17 +406,15 @@ class SocioEconomicStatus:
                                                       lookup_dict=self.employment_dict)
 
         # code smoking data
-        if smoking:
-            survey_dict["Smoking"] = self.dummy_coding(data=survey_dict["Smoking"],
-                                                       col_name="smoking_answer",
-                                                       lookup_dict=self.smoking_dict)
+        survey_dict["Smoking"] = self.dummy_coding(data=survey_dict["Smoking"],
+                                                   col_name="smoking_answer",
+                                                   lookup_dict=self.smoking_dict)
 
         # merge data
         data = survey_dict["Income"].join(survey_dict["Education"], how="inner", on="person_id")
         data = data.join(survey_dict["Home"], how="inner", on="person_id")
         data = data.join(survey_dict["Employment"], how="inner", on="person_id")
-        if smoking:
-            data = data.join(survey_dict["Smoking"], how="inner", on="person_id")
+        data = data.join(survey_dict["Smoking"], how="inner", on="person_id")
 
         data = self.split_string(df=data, col="income_answer", split_by=": ", item_index=1)
         data = self.split_string(df=data, col="education_answer", split_by=": ", item_index=1)
@@ -427,7 +426,8 @@ class SocioEconomicStatus:
                 "income_answer": "annual income",
                 "education_answer": "highest degree",
                 "home_answer": "home ownership",
-                "employment_answer": "employment status"
+                "employment_answer": "employment status",
+                "smoking_answer": "smoking status"
             }
         )
 
