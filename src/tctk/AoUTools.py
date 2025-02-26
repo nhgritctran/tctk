@@ -407,7 +407,7 @@ class SocioEconomicStatus:
         # code smoking data
         if smoking:
             survey_dict["Smoking"] = self.dummy_coding(data=survey_dict["Smoking"],
-                                                       col_name="answer",
+                                                       col_name="smoking_answer",
                                                        lookup_dict=self.smoking_dict)
 
         # merge data
