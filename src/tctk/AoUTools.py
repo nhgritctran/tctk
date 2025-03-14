@@ -304,7 +304,11 @@ class SocioEconomicStatus:
         :param data:
         :return:
         """
-        ses_data = self.aou_ses[["PERSON_ID", "MEDIAN_INCOME"]]
+        ses_data = self.aou_ses[["PERSON_ID", "ZIP3_AS_STRING", "MEDIAN_INCOME"]]
+
+        # convert zip3 strings to 3 digit codes
+        ses_data = ses_data.with_columns(pl.col("code").str.slice(0, 3).alias("zip3"))
+        ses_data = ses_data.drop("ZIP3_AS_STRING", axis=1)
 
         # mapping median income to income brackets
         ses_data = ses_data.with_columns(pl.when((pl.col("MEDIAN_INCOME") >= 0.00) &
