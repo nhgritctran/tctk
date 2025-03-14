@@ -308,7 +308,7 @@ class SocioEconomicStatus:
 
         # convert zip3 strings to 3 digit codes
         ses_data = ses_data.with_columns(pl.col("ZIP3_AS_STRING").str.slice(0, 3).alias("zip3"))
-        ses_data = ses_data.drop("ZIP3_AS_STRING", axis=1)
+        ses_data = ses_data.drop("ZIP3_AS_STRING")
 
         # mapping median income to income brackets
         ses_data = ses_data.with_columns(pl.when((pl.col("MEDIAN_INCOME") >= 0.00) &
