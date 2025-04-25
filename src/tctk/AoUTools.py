@@ -420,7 +420,6 @@ class SocioEconomicStatus:
         data = data.join(survey_dict["Employment"], how="inner", on="person_id")
         if smoking:
             data = data.join(survey_dict["Smoking"], how="left", on="person_id")
-            data = data.with_columns(pl.col("smoking_answer").fill_null("Unknown"))
 
         data = self.split_string(df=data, col="income_answer", split_by=": ", item_index=1)
         data = self.split_string(df=data, col="education_answer", split_by=": ", item_index=1)
