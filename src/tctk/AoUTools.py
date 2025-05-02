@@ -477,7 +477,7 @@ class Demographic:
                     (
                     SELECT
                         person_id,
-                        1 AS sex_at_birth
+                        "male" AS sex_at_birth
                     FROM
                         {self.ds}.person
                     WHERE
@@ -487,7 +487,7 @@ class Demographic:
                     (
                     SELECT
                         person_id,
-                        0 AS sex_at_birth
+                        "female" AS sex_at_birth
                     FROM
                         {self.ds}.person
                     WHERE
@@ -605,11 +605,11 @@ class Demographic:
     def get_demographic_data(
             self,
             cohort_csv_file_path,
-            output_csv_file_path="cohort_with_demographic_data.csv",
-            current_age=True,
-            sex=True,
-            race_ethnicity=True,
-            diagnosis=True
+            output_csv_file_path=None,
+            current_age=False,
+            sex=False,
+            race_ethnicity=False,
+            diagnosis=False
     ):
         # Load data
         cohort_df = pl.read_csv(cohort_csv_file_path)
@@ -628,6 +628,8 @@ class Demographic:
         if diagnosis:
             dx_df = PT.polars_gbq(self.dx_query())
             demo_df = demo_df.join(dx_df, how="left", on="person_id")
+        if output_csv_file_path is None:
+            output_csv_file_path = "cohort_with_demographic_data.csv"
         demo_df.write_csv(output_csv_file_path)
         print("Done.")
         print()
