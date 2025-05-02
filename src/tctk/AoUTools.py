@@ -477,7 +477,8 @@ class Demographic:
                     (
                     SELECT
                         person_id,
-                        "male" AS sex_at_birth
+                        1 AS sex_at_birth,
+                        "male" AS sex
                     FROM
                         {self.ds}.person
                     WHERE
@@ -487,7 +488,8 @@ class Demographic:
                     (
                     SELECT
                         person_id,
-                        "female" AS sex_at_birth
+                        0 AS sex_at_birth,
+                        "female" AS sex
                     FROM
                         {self.ds}.person
                     WHERE
