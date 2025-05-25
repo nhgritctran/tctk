@@ -638,11 +638,22 @@ class Demographic:
         print(f"Demographic data saved to {output_csv_file_path}")
 
     @staticmethod
-    def create_table_one(cohort_csv_file_path, columns_to_use: list, group_by: str):
+    def create_table_one(
+            cohort_csv_file_path,
+            columns_to_use: list,
+            group_by: str,
+            missing=False,
+            include_null=True
+    ):
         # load cohort data
         df = pl.read_csv(cohort_csv_file_path)
 
         # create table one
-        table_one = TableOne(df[columns_to_use].to_pandas(), groupby=group_by)
+        table_one = TableOne(
+            data=df[columns_to_use].to_pandas(),
+            groupby=group_by,
+            missing=missing,
+            include_null=include_null
+        )
 
         return table_one
