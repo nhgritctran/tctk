@@ -12,6 +12,7 @@ import tctk.PolarsTools as PT
 class dsub:
     """
     This class is a wrapper to run dsub on the All of Us researcher workbench.
+    input_dict and output_dict values must be paths to Google Cloud Storage bucket(s).
     """
 
     def __init__(
@@ -19,11 +20,8 @@ class dsub:
         docker_image: str,
         job_script_name: str,
         job_name: str,
-        input_files_dict: {},
-        multiple_output_files=False,
-        output_file_name="",
-        output_file_pattern="",
-        output_folder=None,
+        input_dict: {},
+        output_dict: {},
         log_file_path=None,
         machine_type: str = "c3d-highcpu-4",
         disk_type="pd-ssd",
@@ -42,10 +40,8 @@ class dsub:
         # Standard attributes
         self.docker_image = docker_image
         self.job_script_name = job_script_name
-        self.input_files_dict = input_files_dict
-        self.multiple_output_files = multiple_output_files
-        self.output_file_name = output_file_name
-        self.output_file_pattern = output_file_pattern
+        self.input_dict = input_dict
+        self.output_dict = output_dict
         self.machine_type = machine_type
         self.disk_type = disk_type
         self.boot_disk_size = boot_disk_size
@@ -65,16 +61,10 @@ class dsub:
         self.date = datetime.date.today().strftime("%Y%m%d")
         self.time = datetime.datetime.now().strftime("%H%M%S")
 
-        # output folder
-        if output_folder is not None:
-            self.output_folder = output_folder
-        else:
-            self.output_folder = (
-                f"{self.bucket}/dsub/results/{self.job_name}/{self.user_name}/{self.date}/{self.time}"
-            )
-        self.phewas_output_file = (
-            f"/mnt/data/output/{self.output_folder.replace(':/', '')}/{self.output_file_name}"
-        )
+        # dsub output dict
+        self.dsub_output_dict = {}
+        for k, v in output_dict.items():
+            self.dsub_output_dict[k] = f"/mnt/data/output/{v.replace(':/', '')}"
 
         # log file path
         if log_file_path is not None:
@@ -115,31 +105,21 @@ class dsub:
 
         # generate input flags
         input_flags = ""
-        if len(self.input_files_dict) > 0:
-            for k, v in self.input_files_dict.items():
+        if len(self.input_dict) > 0:
+            for k, v in self.input_dict.items():
                 input_flags += f"--input {k}={v}" + " "
 
         # generate output flag
-        output_flag = ""
-        if self.output_file_name != "":
-            if self.multiple_output_files:
-                if self.output_file_pattern != "":
-                    output_flag += f"--output OUTPUT_FILES={self.output_folder}/{self.output_file_pattern}" + " "
-                else:
-                    print("Multiple output files require output_file_pattern.")
-                    sys.exit(1)
-            else:
-                output_flag += f"--output OUTPUT_FILE={self.output_folder}/{self.output_file_name}" + " "
-            output_flag += f"--env PHEWAS_OUTPUT_FILE={self.phewas_output_file}" + " "
-        else:
-            print("output_file_name is required.")
-            sys.exit(1)
+        output_flags = ""
+        if len(self.output_dict) > 0:
+            for k, v in self.output_dict.items():
+                output_flags += f"--output {k}={v}" + " "
 
         # job script flag
         job_script = f"--script {self.job_script_name}"
 
         # combined script
-        script = base_script + input_flags + output_flag + job_script
+        script = base_script + input_flags + output_flags + job_script
 
         # add preemptible argument if used
         if self.preemptible:
