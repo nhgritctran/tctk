@@ -61,11 +61,6 @@ class dsub:
         self.date = datetime.date.today().strftime("%Y%m%d")
         self.time = datetime.datetime.now().strftime("%H%M%S")
 
-        # dsub output dict
-        self.dsub_output_dict = {}
-        for k, v in output_dict.items():
-            self.dsub_output_dict[k] = f"/mnt/data/output/{v.replace(':/', '')}"
-
         # log file path
         if log_file_path is not None:
             self.log_file_path = log_file_path
