@@ -195,22 +195,25 @@ class dsub:
 
         s = subprocess.run([self._dsub_script()], shell=True, capture_output=True, text=True)
 
-        if show_command:
-            print("dsub command:")
-            print(self.dsub_command)
-            self.dsub_command = s.args[0].replace("--", "\\ \n--")
-            print()
-
         if s.returncode == 0:
             print(f"Successfully run dsub to schedule job {self.job_name}.")
             self.job_id = s.stdout.strip()
             print("job-id:", s.stdout)
+            print()
+            self.dsub_command = s.args[0].replace("--", "\\ \n--")
+            if show_command:
+                print("dsub command:")
+                print(self.dsub_command)
 
         else:
             print(f"Failed to run dsub to schedule job {self.job_name}.")
             print()
             print("Error information:")
             print(s.stderr)
+            self.dsub_command = s.args[0].replace("--", "\\ \n--")
+            if show_command:
+                print("dsub command:")
+                print(self.dsub_command)
 
 
 class SocioEconomicStatus:
