@@ -116,7 +116,7 @@ class dsub:
         env_flags = ""
         if len(self.env_dict) > 0:
             for k, v in self.env_dict.items():
-                env_flags += f"--env {k}={v}" + " "
+                env_flags += f"--env {k}=\"{v}\"" + " "
 
         # job script flag
         job_script = f"--script {self.job_script_name}"
@@ -196,6 +196,8 @@ class dsub:
         if show_command:
             print("dsub command:")
             print(self.dsub_command)
+            self.dsub_command = s.args[0].replace("--", "\\ \n--")
+            print()
 
         s = subprocess.run([self._dsub_script()], shell=True, capture_output=True, text=True)
 
@@ -203,8 +205,6 @@ class dsub:
             print(f"Successfully run dsub to schedule job {self.job_name}.")
             self.job_id = s.stdout.strip()
             print("job-id:", s.stdout)
-            print()
-            self.dsub_command = s.args[0].replace("--", "\\ \n--")
 
         else:
             print(f"Failed to run dsub to schedule job {self.job_name}.")
