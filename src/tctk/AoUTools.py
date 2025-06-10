@@ -22,6 +22,7 @@ class dsub:
         job_name: str,
         input_dict: {},
         output_dict: {},
+        env_dict: {},
         log_file_path=None,
         machine_type: str = "c3d-highcpu-4",
         disk_type="pd-ssd",
@@ -42,6 +43,7 @@ class dsub:
         self.job_script_name = job_script_name
         self.input_dict = input_dict
         self.output_dict = output_dict
+        self.env_dict = env_dict
         self.machine_type = machine_type
         self.disk_type = disk_type
         self.boot_disk_size = boot_disk_size
@@ -110,11 +112,17 @@ class dsub:
             for k, v in self.output_dict.items():
                 output_flags += f"--output {k}={v}" + " "
 
+        # generate env flags
+        env_flags = ""
+        if len(self.env_dict) > 0:
+            for k, v in self.env_dict.items():
+                env_flags += f"--env {k}={v}" + " "
+
         # job script flag
         job_script = f"--script {self.job_script_name}"
 
         # combined script
-        script = base_script + input_flags + output_flags + job_script
+        script = base_script + input_flags + output_flags + job_script + env_flags
 
         # add preemptible argument if used
         if self.preemptible:
