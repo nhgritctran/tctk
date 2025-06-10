@@ -119,10 +119,10 @@ class dsub:
                 env_flags += f"--env {k}=\"{v}\"" + " "
 
         # job script flag
-        job_script = f"--script {self.job_script_name}"
+        job_script = f"--script {self.job_script_name}" + " "
 
         # combined script
-        script = base_script + input_flags + output_flags + job_script + env_flags
+        script = base_script + env_flags + input_flags + output_flags + job_script
 
         # add preemptible argument if used
         if self.preemptible:
