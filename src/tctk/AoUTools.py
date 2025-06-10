@@ -193,6 +193,10 @@ class dsub:
 
     def run(self, show_command=False):
 
+        if show_command:
+            print("dsub command:")
+            print(self.dsub_command)
+
         s = subprocess.run([self._dsub_script()], shell=True, capture_output=True, text=True)
 
         if s.returncode == 0:
@@ -201,9 +205,7 @@ class dsub:
             print("job-id:", s.stdout)
             print()
             self.dsub_command = s.args[0].replace("--", "\\ \n--")
-            if show_command:
-                print("dsub command:")
-                print(self.dsub_command)
+
         else:
             print(f"Failed to run dsub to schedule job {self.job_name}.")
             print()
