@@ -7,9 +7,10 @@ import polars as pl
 import subprocess
 import sys
 import tctk.PolarsTools as PT
+import yaml
 
 
-class dsub:
+class Dsub:
     """
     This class is a wrapper to run dsub on the All of Us researcher workbench.
     input_dict and output_dict values must be paths to Google Cloud Storage bucket(s).
@@ -214,6 +215,334 @@ class dsub:
             if show_command:
                 print("dsub command:")
                 print(self.dsub_command)
+
+
+class DsubUtils:
+
+    """Utilities for dsub"""
+
+    @staticmethod
+    def extract_events(dsub_status_text, latest_only=False):
+        """
+        Extract events section from dsub status output.
+
+        :param dsub_status_text: string containing the full dsub status output
+        :type dsub_status_text: str
+        :param latest_only: if True, return only the most recent event with job status
+        :type latest_only: bool
+        :return: list of event dictionaries with name and start-time, or single dict if latest_only=True
+        :rtype: list[dict] or dict
+        """
+        try:
+            # Parse the YAML content
+            data = yaml.safe_load(dsub_status_text)
+
+            # Extract events
+            events = data.get('events', [])
+
+            if latest_only:
+                # Return latest event with job status
+                if not events:
+                    return {
+                        'latest_event': None,
+                        'event_time': None,
+                        'job_status': data.get('status', 'UNKNOWN'),
+                        'status_message': data.get('status-message', '')
+                    }
+
+                # Events are typically in chronological order, so take the last one
+                latest_event = events[-1]
+
+                return {
+                    'latest_event': latest_event.get('name', ''),
+                    'event_time': latest_event.get('start-time', ''),
+                    'job_status': data.get('status', 'UNKNOWN'),
+                    'status_message': data.get('status-message', '')
+                }
+
+            # Return all events
+            formatted_events = []
+            for event in events:
+                formatted_event = {
+                    'name': event.get('name', ''),
+                    'start_time': event.get('start-time', '')
+                }
+                formatted_events.append(formatted_event)
+
+            return formatted_events
+
+        except Exception as e:
+            print(f"Error parsing events: {e}")
+            if latest_only:
+                return {
+                    'latest_event': None,
+                    'event_time': None,
+                    'job_status': 'ERROR',
+                    'status_message': f'Parse error: {e}'
+                }
+            return []
+
+
+    @staticmethod
+    def extract_job_summary(dsub_status_text):
+        """
+        Extract job summary section from script-name to the end.
+
+        :param dsub_status_text: string containing the full dsub status output
+        :type dsub_status_text: str
+        :return: dictionary containing script-name through status fields
+        :rtype: dict
+        """
+        try:
+            # Parse the YAML content
+            data = yaml.safe_load(dsub_status_text)
+
+            # Extract the summary fields (from script-name onwards)
+            summary_fields = [
+                'script-name', 'start-time', 'status',
+                'status-detail', 'status-message'
+            ]
+
+            summary = {}
+            for field in summary_fields:
+                if field in data:
+                    summary[field] = data[field]
+
+            # Also include script content if present
+            if 'script' in data:
+                summary['script'] = data['script']
+
+            return summary
+
+        except Exception as e:
+            print(f"Error parsing job summary: {e}")
+            return {}
+
+
+    @staticmethod
+    def parse_dsub_status(dsub_status_text):
+        """
+        Parse complete dsub status and return both events and summary.
+
+        :param dsub_status_text: string containing the full dsub status output
+        :type dsub_status_text: str
+        :return: tuple containing (events_list, summary_dict)
+        :rtype: tuple[list[dict], dict]
+        """
+        events = DsubUtils.extract_events(dsub_status_text)
+        summary = DsubUtils.extract_job_summary(dsub_status_text)
+
+        return events, summary
+
+
+    @staticmethod
+    def print_events_summary(events):
+        """
+        Helper function to print events in a readable format.
+
+        :param events: list of event dictionaries
+        :type events: list[dict]
+        :return: None
+        :rtype: None
+        """
+        print("Job Events Timeline:")
+        print("-" * 50)
+        for event in events:
+            print(f"{event['name']:20} | {event['start_time']}")
+
+
+    @staticmethod
+    def print_job_summary(summary):
+        """
+        Helper function to print job summary in a readable format.
+
+        :param summary: dictionary containing job summary information
+        :type summary: dict
+        :return: None
+        :rtype: None
+        """
+        print("\nJob Summary:")
+        print("-" * 50)
+        for key, value in summary.items():
+            if key == 'script':
+                print(f"{key:15} | [Script content - {len(value.splitlines())} lines]")
+            else:
+                print(f"{key:15} | {value}")
+
+
+    @staticmethod
+    def aggregate_dsub_status(status_list):
+        """
+        Aggregate multiple dsub status outputs into a summary table.
+
+        :param status_list: list of dsub status text strings or list of dictionaries
+        :type status_list: list[str] or list[dict]
+        :return: list of dictionaries with job summary information
+        :rtype: list[dict]
+        """
+        summary_table = []
+
+        for i, status_item in enumerate(status_list):
+            try:
+                # Handle if input is already parsed dict or raw text
+                if isinstance(status_item, dict):
+                    data = status_item
+                else:
+                    data = yaml.safe_load(status_item)
+
+                # Get latest event info
+                events = data.get('events', [])
+                if events:
+                    latest_event = events[-1].get('name', 'unknown')
+                    latest_event_time = events[-1].get('start-time', '')
+                else:
+                    latest_event = 'no-events'
+                    latest_event_time = ''
+
+                # Build summary row
+                job_summary = {
+                    'job_name': data.get('job-name', f'job-{i}'),
+                    'job_id': data.get('job-id', ''),
+                    'last_event': latest_event,
+                    'last_event_time': latest_event_time,
+                    'status': data.get('status', 'UNKNOWN'),
+                    'status_message': data.get('status-message', ''),
+                    'start_time': data.get('start-time', ''),
+                    'end_time': data.get('end-time', ''),
+                    'duration_minutes': DsubUtils.calculate_duration(data.get('start-time', ''), data.get('end-time', ''))
+                }
+
+                summary_table.append(job_summary)
+
+            except Exception as e:
+                # Handle parsing errors gracefully
+                error_summary = {
+                    'job_name': f'parse-error-{i}',
+                    'job_id': '',
+                    'last_event': 'error',
+                    'last_event_time': '',
+                    'status': 'PARSE_ERROR',
+                    'status_message': str(e),
+                    'start_time': '',
+                    'end_time': '',
+                    'duration_minutes': 0
+                }
+                summary_table.append(error_summary)
+
+        return summary_table
+
+
+    @staticmethod
+    def calculate_duration(start_time, end_time):
+        """
+        Calculate duration between start and end times in minutes.
+
+        :param start_time: start time string
+        :type start_time: str
+        :param end_time: end time string
+        :type end_time: str
+        :return: duration in minutes
+        :rtype: float
+        """
+        try:
+            if not start_time or not end_time:
+                return 0.0
+
+            # Parse times (handle different formats)
+            from dateutil import parser
+            start = parser.parse(start_time)
+            end = parser.parse(end_time)
+
+            duration = (end - start).total_seconds() / 60.0
+            return round(duration, 1)
+
+        except Exception:
+            return 0.0
+
+
+    @staticmethod
+    def print_status_table(summary_table, show_all_columns=False):
+        """
+        Print the aggregated status table in a readable format.
+
+        :param summary_table: list of job summary dictionaries
+        :type summary_table: list[dict]
+        :param show_all_columns: whether to show all columns or just key ones
+        :type show_all_columns: bool
+        :return: None
+        :rtype: None
+        """
+        if not summary_table:
+            print("No jobs to display")
+            return
+
+        # Define column widths
+        if show_all_columns:
+            headers = ['Job Name', 'Job ID', 'Last Event', 'Status', 'Duration (min)', 'Status Message']
+            widths = [20, 25, 15, 10, 12, 30]
+        else:
+            headers = ['Job Name', 'Last Event', 'Status', 'Duration (min)']
+            widths = [25, 20, 12, 12]
+
+        # Print header
+        header_line = " | ".join(h.ljust(w) for h, w in zip(headers, widths))
+        print(header_line)
+        print("-" * len(header_line))
+
+        # Print rows
+        for job in summary_table:
+            if show_all_columns:
+                row_data = [
+                    job['job_name'][:19],
+                    job['job_id'][:24],
+                    job['last_event'][:14],
+                    job['status'][:9],
+                    str(job['duration_minutes']),
+                    job['status_message'][:29]
+                ]
+            else:
+                row_data = [
+                    job['job_name'][:24],
+                    job['last_event'][:19],
+                    job['status'][:11],
+                    str(job['duration_minutes'])
+                ]
+
+            row_line = " | ".join(data.ljust(w) for data, w in zip(row_data, widths))
+            print(row_line)
+
+
+    @staticmethod
+    def save_status_table_csv(summary_table, filename="dsub_status_summary.csv"):
+        """
+        Save the status table to a CSV file.
+
+        :param summary_table: list of job summary dictionaries
+        :type summary_table: list[dict]
+        :param filename: output CSV filename
+        :type filename: str
+        :return: None
+        :rtype: None
+        """
+        import csv
+
+        if not summary_table:
+            print("No data to save")
+            return
+
+        # Get all possible keys from all dictionaries
+        all_keys = set()
+        for job in summary_table:
+            all_keys.update(job.keys())
+
+        fieldnames = sorted(all_keys)
+
+        with open(filename, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(summary_table)
+
+        print(f"Status table saved to {filename}")
 
 
 class SocioEconomicStatus:

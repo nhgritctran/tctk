@@ -1,5 +1,9 @@
 dsub
+google-cloud-bigquery
 polars
 pyarrow
+python-dateutil
 setuptools
+tableone
 tqdm
+yaml
