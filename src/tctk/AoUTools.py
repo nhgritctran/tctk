@@ -958,12 +958,12 @@ class GWAS:
             dsub_jobs[job_name] = dsub_job
             dsub_job.run(show_command=dsub_show_command)
 
-            print("To check all gwas jobs, use method .check_gwas_jobs(dsub_jobs).\n"
-                  "For example, if class GWAS was instantiated as gwas = GWAS() and dsub run as dsub_jobs=gwas.run_gwas_dsub,"
-                  "the command would be gwas.check_gwas_jobs(dsub_jobs)")
-            print()
-            print("To check individual job status, use dsub_jobs[{job_name}].check_status(full=True)")
-            print()
+        print("To check all gwas jobs, use method .check_gwas_jobs(dsub_jobs).\n"
+              "For example, if class GWAS was instantiated as gwas = GWAS() and dsub run as dsub_jobs=gwas.run_gwas_dsub,"
+              "the command would be gwas.check_gwas_jobs(dsub_jobs)")
+        print()
+        print("To check individual job status, use dsub_jobs[{job_name}].check_status(full=True)")
+        print()
 
         return dsub_jobs
 
