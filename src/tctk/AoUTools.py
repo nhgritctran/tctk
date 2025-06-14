@@ -139,7 +139,7 @@ class Dsub:
 
         return script
 
-    def check_status(self, streaming=False, full=False, custom_args=None):
+    def check_status(self, full=False, custom_args=None):
 
         # base command
         check_status = (
@@ -147,22 +147,15 @@ class Dsub:
             f" --jobs \"{self.job_id}\" --users \"{self.user_name}\" --status \"*\""
         )
 
-        # streaming status
-        if streaming:
-            check_status += " --wait --poll-interval 60"
-            print("To get live update, run this command in a bash shell.")
-            print(check_status)
-
         # full static status
-        else:
-            if full:
-                check_status += " --full"
+        if full:
+            check_status += " --full"
 
-            # custom arguments
-            if custom_args is not None:
-                check_status += f" {custom_args}"
+        # custom arguments
+        if custom_args is not None:
+            check_status += f" {custom_args}"
 
-            subprocess.run([check_status], shell=True)
+        subprocess.run([check_status], shell=True)
 
     def view_log(self, log_type="stdout", n_lines=10):
 
@@ -958,19 +951,48 @@ class GWAS:
             dsub_jobs[job_name] = dsub_job
             dsub_job.run(show_command=dsub_show_command)
 
-        print("To check all gwas jobs, use method .check_gwas_jobs(dsub_jobs).\n"
+        print("To check all gwas jobs, use method .check_status(dsub_jobs, show_all=True).\n"
               "For example, if class GWAS was instantiated as gwas = GWAS() and dsub run as dsub_jobs=gwas.run_gwas_dsub,"
-              "the command would be gwas.check_gwas_jobs(dsub_jobs)")
+              "the command would be gwas.check_status(dsub_jobs, show_all=True)")
         print()
-        print("To check individual job status, use dsub_jobs[{job_name}].check_status(full=True)")
+        print("To check individual job status, use gwas.check_gwas_jobs(dsub_jobs, show_all=False, job_name={your_job_name})")
+        print()
+        print("Similarly, to kill all jobs use gwas.kill(dsub_jobs, kill_all=True),"
+              "or gwas.kill(dsub_jobs, kill_all=False, job_name={your_job_name}) to kill an individual job.")
         print()
 
         return dsub_jobs
 
     @staticmethod
-    def check_gwas_jobs(dsub_jobs: dict = None):
-        for k,v in dsub_jobs.items():
-            assert isinstance(v, Dsub)
-            print(k)
-            v.check_status()
-            print()
+    def check_status(dsub_jobs: dict = None, show_all: bool = True, job_name: str = None):
+        if show_all:
+            for k,v in dsub_jobs.items():
+                assert isinstance(v, Dsub)
+                print(k)
+                v.check_status()
+                print()
+        else:
+            if job_name is not None:
+                assert isinstance(dsub_jobs[job_name], Dsub)
+                print(job_name)
+                dsub_jobs[job_name].check_status()
+                print()
+            else:
+                print("Please provide individual job name to show status. To show all, use show_all=True")
+
+    @staticmethod
+    def kill(dsub_jobs: dict = None, kill_all: bool = False, job_name: str = None):
+        if kill_all:
+            for k, v in dsub_jobs.items():
+                assert isinstance(v, Dsub)
+                print(k)
+                v.kill()
+                print()
+        else:
+            if job_name is not None:
+                assert isinstance(dsub_jobs[job_name], Dsub)
+                print(job_name)
+                dsub_jobs[job_name].kill()
+                print()
+            else:
+                print("Please provide individual job name to kill. To kill all, use kill_all=True")
