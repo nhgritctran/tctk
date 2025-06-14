@@ -7,13 +7,12 @@ import polars as pl
 import subprocess
 import sys
 import tctk.PolarsTools as PT
-import yaml
 
 
 class Dsub:
     """
     This class is a wrapper to run dsub on the All of Us researcher workbench.
-    input_dict and output_dict values must be paths to Google Cloud Storage bucket(s).
+    Params input_dict and output_dict values must be paths to Google Cloud Storage bucket(s).
     """
 
     def __init__(
@@ -38,6 +37,7 @@ class Dsub:
         region="us-central1",
         provider="google-cls-v2",
         preemptible=False,
+        custom_args=None,
     ):
         # Standard attributes
         self.docker_image = docker_image
@@ -59,6 +59,7 @@ class Dsub:
         self.region = region
         self.provider = provider
         self.preemptible = preemptible
+        self.custom_args = custom_args
 
         # Internal attributes for optional naming conventions
         self.date = datetime.date.today().strftime("%Y%m%d")
@@ -129,12 +130,16 @@ class Dsub:
         if self.preemptible:
             script += " --preemptible"
 
+        # add custom arguments
+        if self.custom_args is not None:
+            script += " " + self.custom_args
+
         # add attribute for convenience
         self.script = script
 
         return script
 
-    def check_status(self, streaming=False):
+    def check_status(self, streaming=False, full=False, custom_args=None):
 
         # base command
         check_status = (
@@ -145,27 +150,18 @@ class Dsub:
         # streaming status
         if streaming:
             check_status += " --wait --poll-interval 60"
-            process = subprocess.Popen(
-                [check_status],
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                bufsize=1,
-            )
-            try:
-                while True:
-                    output = process.stdout.readline()
-                    if output == '' and process.poll() is not None:
-                        break
-                    if output:
-                        print(output.strip(), flush=True)
-            except KeyboardInterrupt:
-                process.kill()
-                sys.exit(0)
+            print("To get live update, run this command in a bash shell.")
+            print(check_status)
+
         # full static status
         else:
-            check_status += " --full"
+            if full:
+                check_status += " --full"
+
+            # custom arguments
+            if custom_args is not None:
+                check_status += f" {custom_args}"
+
             subprocess.run([check_status], shell=True)
 
     def view_log(self, log_type="stdout", n_lines=10):
@@ -215,334 +211,6 @@ class Dsub:
             if show_command:
                 print("dsub command:")
                 print(self.dsub_command)
-
-
-class DsubUtils:
-
-    """Utilities for dsub"""
-
-    @staticmethod
-    def extract_events(dsub_status_text, latest_only=False):
-        """
-        Extract events section from dsub status output.
-
-        :param dsub_status_text: string containing the full dsub status output
-        :type dsub_status_text: str
-        :param latest_only: if True, return only the most recent event with job status
-        :type latest_only: bool
-        :return: list of event dictionaries with name and start-time, or single dict if latest_only=True
-        :rtype: list[dict] or dict
-        """
-        try:
-            # Parse the YAML content
-            data = yaml.safe_load(dsub_status_text)
-
-            # Extract events
-            events = data.get('events', [])
-
-            if latest_only:
-                # Return latest event with job status
-                if not events:
-                    return {
-                        'latest_event': None,
-                        'event_time': None,
-                        'job_status': data.get('status', 'UNKNOWN'),
-                        'status_message': data.get('status-message', '')
-                    }
-
-                # Events are typically in chronological order, so take the last one
-                latest_event = events[-1]
-
-                return {
-                    'latest_event': latest_event.get('name', ''),
-                    'event_time': latest_event.get('start-time', ''),
-                    'job_status': data.get('status', 'UNKNOWN'),
-                    'status_message': data.get('status-message', '')
-                }
-
-            # Return all events
-            formatted_events = []
-            for event in events:
-                formatted_event = {
-                    'name': event.get('name', ''),
-                    'start_time': event.get('start-time', '')
-                }
-                formatted_events.append(formatted_event)
-
-            return formatted_events
-
-        except Exception as e:
-            print(f"Error parsing events: {e}")
-            if latest_only:
-                return {
-                    'latest_event': None,
-                    'event_time': None,
-                    'job_status': 'ERROR',
-                    'status_message': f'Parse error: {e}'
-                }
-            return []
-
-
-    @staticmethod
-    def extract_job_summary(dsub_status_text):
-        """
-        Extract job summary section from script-name to the end.
-
-        :param dsub_status_text: string containing the full dsub status output
-        :type dsub_status_text: str
-        :return: dictionary containing script-name through status fields
-        :rtype: dict
-        """
-        try:
-            # Parse the YAML content
-            data = yaml.safe_load(dsub_status_text)
-
-            # Extract the summary fields (from script-name onwards)
-            summary_fields = [
-                'script-name', 'start-time', 'status',
-                'status-detail', 'status-message'
-            ]
-
-            summary = {}
-            for field in summary_fields:
-                if field in data:
-                    summary[field] = data[field]
-
-            # Also include script content if present
-            if 'script' in data:
-                summary['script'] = data['script']
-
-            return summary
-
-        except Exception as e:
-            print(f"Error parsing job summary: {e}")
-            return {}
-
-
-    @staticmethod
-    def parse_dsub_status(dsub_status_text):
-        """
-        Parse complete dsub status and return both events and summary.
-
-        :param dsub_status_text: string containing the full dsub status output
-        :type dsub_status_text: str
-        :return: tuple containing (events_list, summary_dict)
-        :rtype: tuple[list[dict], dict]
-        """
-        events = DsubUtils.extract_events(dsub_status_text)
-        summary = DsubUtils.extract_job_summary(dsub_status_text)
-
-        return events, summary
-
-
-    @staticmethod
-    def print_events_summary(events):
-        """
-        Helper function to print events in a readable format.
-
-        :param events: list of event dictionaries
-        :type events: list[dict]
-        :return: None
-        :rtype: None
-        """
-        print("Job Events Timeline:")
-        print("-" * 50)
-        for event in events:
-            print(f"{event['name']:20} | {event['start_time']}")
-
-
-    @staticmethod
-    def print_job_summary(summary):
-        """
-        Helper function to print job summary in a readable format.
-
-        :param summary: dictionary containing job summary information
-        :type summary: dict
-        :return: None
-        :rtype: None
-        """
-        print("\nJob Summary:")
-        print("-" * 50)
-        for key, value in summary.items():
-            if key == 'script':
-                print(f"{key:15} | [Script content - {len(value.splitlines())} lines]")
-            else:
-                print(f"{key:15} | {value}")
-
-
-    @staticmethod
-    def aggregate_dsub_status(status_list):
-        """
-        Aggregate multiple dsub status outputs into a summary table.
-
-        :param status_list: list of dsub status text strings or list of dictionaries
-        :type status_list: list[str] or list[dict]
-        :return: list of dictionaries with job summary information
-        :rtype: list[dict]
-        """
-        summary_table = []
-
-        for i, status_item in enumerate(status_list):
-            try:
-                # Handle if input is already parsed dict or raw text
-                if isinstance(status_item, dict):
-                    data = status_item
-                else:
-                    data = yaml.safe_load(status_item)
-
-                # Get latest event info
-                events = data.get('events', [])
-                if events:
-                    latest_event = events[-1].get('name', 'unknown')
-                    latest_event_time = events[-1].get('start-time', '')
-                else:
-                    latest_event = 'no-events'
-                    latest_event_time = ''
-
-                # Build summary row
-                job_summary = {
-                    'job_name': data.get('job-name', f'job-{i}'),
-                    'job_id': data.get('job-id', ''),
-                    'last_event': latest_event,
-                    'last_event_time': latest_event_time,
-                    'status': data.get('status', 'UNKNOWN'),
-                    'status_message': data.get('status-message', ''),
-                    'start_time': data.get('start-time', ''),
-                    'end_time': data.get('end-time', ''),
-                    'duration_minutes': DsubUtils.calculate_duration(data.get('start-time', ''), data.get('end-time', ''))
-                }
-
-                summary_table.append(job_summary)
-
-            except Exception as e:
-                # Handle parsing errors gracefully
-                error_summary = {
-                    'job_name': f'parse-error-{i}',
-                    'job_id': '',
-                    'last_event': 'error',
-                    'last_event_time': '',
-                    'status': 'PARSE_ERROR',
-                    'status_message': str(e),
-                    'start_time': '',
-                    'end_time': '',
-                    'duration_minutes': 0
-                }
-                summary_table.append(error_summary)
-
-        return summary_table
-
-
-    @staticmethod
-    def calculate_duration(start_time, end_time):
-        """
-        Calculate duration between start and end times in minutes.
-
-        :param start_time: start time string
-        :type start_time: str
-        :param end_time: end time string
-        :type end_time: str
-        :return: duration in minutes
-        :rtype: float
-        """
-        try:
-            if not start_time or not end_time:
-                return 0.0
-
-            # Parse times (handle different formats)
-            from dateutil import parser
-            start = parser.parse(start_time)
-            end = parser.parse(end_time)
-
-            duration = (end - start).total_seconds() / 60.0
-            return round(duration, 1)
-
-        except Exception:
-            return 0.0
-
-
-    @staticmethod
-    def print_status_table(summary_table, show_all_columns=False):
-        """
-        Print the aggregated status table in a readable format.
-
-        :param summary_table: list of job summary dictionaries
-        :type summary_table: list[dict]
-        :param show_all_columns: whether to show all columns or just key ones
-        :type show_all_columns: bool
-        :return: None
-        :rtype: None
-        """
-        if not summary_table:
-            print("No jobs to display")
-            return
-
-        # Define column widths
-        if show_all_columns:
-            headers = ['Job Name', 'Job ID', 'Last Event', 'Status', 'Duration (min)', 'Status Message']
-            widths = [20, 25, 15, 10, 12, 30]
-        else:
-            headers = ['Job Name', 'Last Event', 'Status', 'Duration (min)']
-            widths = [25, 20, 12, 12]
-
-        # Print header
-        header_line = " | ".join(h.ljust(w) for h, w in zip(headers, widths))
-        print(header_line)
-        print("-" * len(header_line))
-
-        # Print rows
-        for job in summary_table:
-            if show_all_columns:
-                row_data = [
-                    job['job_name'][:19],
-                    job['job_id'][:24],
-                    job['last_event'][:14],
-                    job['status'][:9],
-                    str(job['duration_minutes']),
-                    job['status_message'][:29]
-                ]
-            else:
-                row_data = [
-                    job['job_name'][:24],
-                    job['last_event'][:19],
-                    job['status'][:11],
-                    str(job['duration_minutes'])
-                ]
-
-            row_line = " | ".join(data.ljust(w) for data, w in zip(row_data, widths))
-            print(row_line)
-
-
-    @staticmethod
-    def save_status_table_csv(summary_table, filename="dsub_status_summary.csv"):
-        """
-        Save the status table to a CSV file.
-
-        :param summary_table: list of job summary dictionaries
-        :type summary_table: list[dict]
-        :param filename: output CSV filename
-        :type filename: str
-        :return: None
-        :rtype: None
-        """
-        import csv
-
-        if not summary_table:
-            print("No data to save")
-            return
-
-        # Get all possible keys from all dictionaries
-        all_keys = set()
-        for job in summary_table:
-            all_keys.update(job.keys())
-
-        fieldnames = sorted(all_keys)
-
-        with open(filename, 'w', newline='') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(summary_table)
-
-        print(f"Status table saved to {filename}")
 
 
 class SocioEconomicStatus:
@@ -974,3 +642,321 @@ class Demographic:
         )
 
         return table_one
+
+
+class GWAS:
+
+    def __init__(self):
+        self.bucket = os.getenv("WORKSPACE_BUCKET")
+
+    @staticmethod
+    def generate_sh_script(script_name, commands):
+        with open(script_name, 'w') as f:
+            f.write("#!/bin/bash\n")  # Shebang line for bash
+            for command in commands:
+                f.write(command + "\n")
+
+        # Make script executable
+        import os
+        os.chmod(script_name, 0o755)
+
+        print(f"Generated script: {script_name}")
+
+
+    @staticmethod
+    def generate_plink2_variant_filter_script(
+            script_name: str = "variant_filter.sh",
+            hwe_threshold: float = 0.000001,
+            geno_threshold: float = 0.1,
+            mind_threshold: float = 0.1,
+            maf_threshold: float = 0.01,
+            biallelic_only: bool = True,
+            split_multi_allelic: bool = False,
+            custom_args: str = None,
+    ):
+        """
+        Generate a simple PLINK2 filtering script.
+
+        :param custom_args: Extra args to be used
+        :param script_name: Name of the output shell script
+        :param hwe_threshold: Hardy-Weinberg's equilibrium p-value threshold
+        :param geno_threshold: Genotype missingness threshold
+        :param mind_threshold: Individual missingness threshold
+        :param maf_threshold: Minor allele frequency threshold
+        :param split_multi_allelic: split multi-allelic alleles or not
+        :param biallelic_only: use only biallelic alleles or not
+        """
+
+        prerun_command = "PLINK_OUTPUT_BASE=$(echo $OUTPUT_PGEN | sed 's/.pgen$//g')"
+
+        plink_command = "plink2 --pgen $INPUT_PGEN --pvar $INPUT_PVAR --psam $INPUT_PSAM --make-pgen --no-fid --out $PLINK_OUTPUT_BASE"
+        if hwe_threshold:
+            plink_command += f" --hwe {hwe_threshold}"
+        if geno_threshold:
+            plink_command += f" --geno {geno_threshold}"
+        if mind_threshold:
+            plink_command += f" --mind {mind_threshold}"
+        if maf_threshold:
+            plink_command += f" --maf {maf_threshold}"
+        if biallelic_only:
+            plink_command += f" --max-alleles 2"
+        if split_multi_allelic:
+            plink_command += f" --split_multiallelic"
+        if custom_args is not None:
+            plink_command += f" {custom_args}"
+
+        # add FID for psam
+        postrun_command = "echo -e '#FID\\tIID\\tSEX' > ${PLINK_OUTPUT_BASE}.tmp; cat \"${PLINK_OUTPUT_BASE}.psam\" | tail -n +2 | awk -F '\\t' -v 'OFS=\\t' '{ print $1, $1, $2 }' >> ${PLINK_OUTPUT_BASE}.tmp; mv ${PLINK_OUTPUT_BASE}.tmp ${PLINK_OUTPUT_BASE}.psam"
+        postrun_command += "\necho 'Added FID to psam file'"
+        postrun_command += "\nhead -n 5 ${PLINK_OUTPUT_BASE}.psam"
+
+        script_commands = [
+            prerun_command,
+            plink_command,
+            postrun_command
+        ]
+
+        GWAS.generate_sh_script(script_name=script_name, commands=script_commands)
+
+    @staticmethod
+    def generate_regenie_gwas_script(
+            script_name: str = "regenie_gwas.sh",
+            pgen_prefix: str = None,
+            output_prefix: str = None,
+            threads: int = 4,
+            step1_block_size: int = 1000,
+            step2_block_size: int = 400,
+            step1_custom_args: str = None,
+            step2_custom_args: str = None,
+    ):
+        """
+        Generate a simple REGENIE GWAS script compatible with REGENIE v4.1.
+        """
+
+        if pgen_prefix is None:
+            pgen_prefix = "$PLINK_OUTPUT_BASE"
+
+        if output_prefix is None:
+            output_prefix = "REGENIE_OUTPUT_BASE"
+
+        prerun_command = "REGENIE_OUTPUT_BASE=$(echo $REGENIE_OUTPUT_FILES | sed 's/\*$//')"
+
+        base_script = f"regenie --pgen {pgen_prefix} --phenoFile $INPUT_PHENO --covarFile $INPUT_COV --threads {threads}"
+        step1_script = base_script + " --step 1"
+        step2_script = base_script + " --step 2"
+
+        # step 1
+        step1_script += f" --out ${{{output_prefix}}}_gwas_step1"
+        step1_script += f" --bsize {step1_block_size}"
+        if step1_custom_args is not None:
+            step1_script += f" {step1_custom_args}"
+
+        # step 2
+        step2_script += f" --out ${{{output_prefix}}}_gwas_step2"
+        step2_script += f" --pred ${{{output_prefix}}}_gwas_step1_pred.list"
+        step2_script += f" --bsize {step2_block_size}"
+        step2_script += f" --firth --approx"
+        if step2_custom_args is not None:
+            step2_script += f" {step2_custom_args}"
+
+        script_commands = [prerun_command, step1_script, step2_script]
+
+        GWAS.generate_sh_script(script_name=script_name, commands=script_commands)
+
+    @staticmethod
+    def prepare_regenie_inputs(
+            complete_table_path: str,
+            pheno_cols: list,
+            cov_cols: list,
+            iid_col: str,
+            fid_col: str = None,
+            input_seperator: str = ",",
+            schema_dict=None,
+            output_prefix: str = ""
+    ):
+        """
+        Generate phenotype.txt and covariate.txt to run GWAS with regenie.
+        NOTE: this function will calculate the average phenotype (score) for each person since each has multiple values.
+        This would only work for a single continuous phenotype and will need to generalize for multiple phenotypes.
+        """
+        if schema_dict is None:
+            schema_dict = {}
+
+        complete_table = pl.read_csv(f"{complete_table_path}", separator=input_seperator, schema_overrides=schema_dict)
+        cols = [iid_col] + pheno_cols + cov_cols
+        if fid_col is not None:
+            cols += [fid_col]
+        complete_table = complete_table.unique()
+
+        # prepare FID & IID
+        if fid_col is None:
+            complete_table = complete_table.with_columns(pl.col(iid_col).alias("FID"))
+        else:
+            if fid_col != "FID":
+                complete_table = complete_table.rename({fid_col: "FID"})
+        if iid_col != "IID":
+            complete_table = complete_table.rename({iid_col: "IID"})
+
+        # phenotypes
+        pheno_table = complete_table[["FID", "IID"] + pheno_cols].unique()
+        pheno_table = pheno_table.group_by(["FID", "IID"]).agg(
+            pl.col("lnk").mean().alias("lnk"))  # need to generalize for multiple phenotypes
+        pheno_file = f"{output_prefix}phenotypes.txt"
+        print(f"Phenotype file saved as {pheno_file}")
+        pheno_table.write_csv(pheno_file, separator="\t")
+        print()
+
+        # covariates
+        cov_table = complete_table[["FID", "IID"] + cov_cols].unique()
+        cov_file = f"{output_prefix}covariates.txt"
+        print(f"Covariate file saved as {cov_file}")
+        cov_table.write_csv(cov_file, separator="\t")
+        print()
+
+        # unique combined table
+        unique_combined_table = pheno_table.join(cov_table, how="inner", on=["FID", "IID"])
+        unique_combined_table = unique_combined_table.with_columns(pl.col("IID").alias("person_id"))
+        name, ext = os.path.splitext(complete_table_path)
+        combined_file = name + ".txt"
+        print(f"Combined file saved as {combined_file}")
+        unique_combined_table.write_csv(combined_file, separator=",")
+        print()
+
+    @staticmethod
+    def merge_scripts(
+            script_file_list: list,
+            output_file_name: str
+    ):
+        """
+        Merge shell scripts, removing the first line (shebang) from all but the first script.
+
+        Parameters:
+        script_files: list of script file paths
+        output_file: output file path
+        """
+        with open(output_file_name, 'w') as outfile:
+            for i, script_file in enumerate(script_file_list):
+                with open(script_file, 'r') as infile:
+                    lines = infile.readlines()
+
+                # Skip the first line for subsequent scripts (remove shebang)
+                start_line = 1 if i > 0 else 0
+
+                for line in lines[start_line:]:
+                    outfile.write(line)
+
+                # Add a newline between scripts
+                if i < len(script_file_list) - 1:
+                    outfile.write('\n')
+
+    @staticmethod
+    def run_gwas_dsub(
+        regenie_input_pheno_file_path: str,
+        regenie_input_cov_file_path: str,
+        regenie_threads: int = 4,
+        regenie_output_folder: str = None,
+        plink_hwe_threshold: float = 0.000001,
+        plink_geno_threshold: float = 0.1,
+        plink_mind_threshold: float = 0.1,
+        plink_maf_threshold: float = 0.01,
+        plink_biallelic_only: bool = True,
+        plink_split_multi_allelic: bool = False,
+        plink_input_folder: str = "gs://fc-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/pgen/",
+        plink_input_file_prefix: str = "acaf_threshold.chr",
+        plink_output_folder: str = None,
+        dsub_job_prefix: str = f"dsub_{datetime.datetime.now().strftime('%Y%m%d')}",
+        dsub_env_dict=None,
+        dsub_machine_type: str = "c4d-highcpu-8",
+        dsub_disk_type: str = "hyperdisk-balanced",
+        dsub_region: str = "us-central1",
+        dsub_docker_image: str = "gcr.io/ni-nhgri-phis-comp-initiative/gptk:0.1",
+        dsub_custom_args: str = None,
+        dsub_preemptible: bool = False,
+        chr_list=None,  # exclude sex chromosome
+    ):
+
+        if dsub_env_dict is None:
+            dsub_env_dict = {}
+        if chr_list is None:
+            chr_list = list(range(1, 23))
+
+        # Generate PLINK2 script to filter variant from pgen
+        print("Generating PLINK2 script to filter variant...")
+        plink_script_name = "variant_filter.sh"
+        GWAS.generate_plink2_variant_filter_script(
+            script_name=plink_script_name,
+            hwe_threshold=plink_hwe_threshold,
+            geno_threshold=plink_geno_threshold,
+            mind_threshold=plink_mind_threshold,
+            maf_threshold=plink_maf_threshold,
+            biallelic_only=plink_biallelic_only,
+            split_multi_allelic=plink_split_multi_allelic
+        )
+        print()
+
+        # Generate REGENIE script to run gwas
+        print("Generating REGENIE script to run GWAS...")
+        regenie_script_name = "regenie_gwas.sh"
+        GWAS.generate_regenie_gwas_script(
+            script_name=regenie_script_name,
+            threads=regenie_threads,
+        )
+        print()
+
+        # Merge scripts
+        print("Merging PLINK2 and REGENIE scripts...")
+        merged_script_name = "plink_regenie_gwas.sh"
+        GWAS.merge_scripts(
+            script_file_list=[plink_script_name, regenie_script_name],
+            output_file_name=merged_script_name
+        )
+        print()
+
+        # Run GWAS with dsub
+        dsub_jobs = {}
+        for i in chr_list:
+            job_name = f"{dsub_job_prefix}_chr{i}"
+
+            plink_input_base = plink_input_folder + f"{plink_input_file_prefix}{i}"
+            plink_output_base = f"{plink_output_folder}/{dsub_job_prefix}/filtered_{plink_input_file_prefix}{i}"
+
+            regenie_output_base = f"{regenie_output_folder}/{dsub_job_prefix}"
+            regenie_input_pheno = f"{regenie_input_pheno_file_path}"
+            regenie_input_cov = f"{regenie_input_cov_file_path}"
+
+            dsub_job = Dsub(
+                machine_type=dsub_machine_type,
+                disk_type=dsub_disk_type,
+                docker_image=dsub_docker_image,
+                job_script_name=merged_script_name,
+                job_name=job_name,
+                input_dict={
+                    "INPUT_PGEN": f"{plink_input_base}.pgen",
+                    "INPUT_PVAR": f"{plink_input_base}.pvar",
+                    "INPUT_PSAM": f"{plink_input_base}.psam",
+                    "INPUT_PHENO": f"{regenie_input_pheno}",
+                    "INPUT_COV": f"{regenie_input_cov}"
+                },
+                output_dict={
+                    "OUTPUT_PGEN": f"{plink_output_base}.pgen",
+                    "OUTPUT_PVAR": f"{plink_output_base}.pvar",
+                    "OUTPUT_PSAM": f"{plink_output_base}.psam",
+                    "REGENIE_OUTPUT_FILES": f"{regenie_output_base}*"
+                },
+                env_dict=dsub_env_dict,
+                region=dsub_region,
+                custom_args=dsub_custom_args,
+                preemptible=dsub_preemptible,
+            )
+            dsub_jobs[job_name] = dsub_job
+            dsub_job.run(show_command=False)
+
+        return dsub_jobs
+
+    @staticmethod
+    def check_gwas_jobs(dsub_jobs: dict = None):
+        for k,v in dsub_jobs.items():
+            assert isinstance(v, Dsub)
+            print(k)
+            v.check_status()
+            print()
