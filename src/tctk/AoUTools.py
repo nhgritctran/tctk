@@ -876,6 +876,7 @@ class GWAS:
             dsub_env_dict = {}
         if chr_list is None:
             chr_list = list(range(1, 23))
+        dsub_job_prefix = dsub_job_prefix.replace("_", "-")
 
         # Generate PLINK2 script to filter variant from pgen
         print("Generating PLINK2 script to filter variant...")
@@ -915,7 +916,7 @@ class GWAS:
         # Run GWAS with dsub
         dsub_jobs = {}
         for i in chr_list:
-            job_name = f"{dsub_job_prefix}_chr{i}"
+            job_name = f"{dsub_job_prefix}-chr{i}"
 
             plink_input_base = plink_input_folder + f"{plink_input_file_prefix}{i}"
             plink_output_base = f"{plink_output_folder}/{dsub_job_prefix}/filtered_{plink_input_file_prefix}{i}"
