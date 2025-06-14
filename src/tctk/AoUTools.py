@@ -871,6 +871,9 @@ class GWAS:
         dsub_show_command: bool = False,
         chr_list=None,  # exclude sex chromosome
     ):
+        regenie_output_folder = regenie_output_folder.rstrip("/")
+        plink_input_folder = plink_input_folder.rstrip("/")
+        plink_output_folder = plink_output_folder.rstrip("/")
 
         if dsub_env_dict is None:
             dsub_env_dict = {}
@@ -918,7 +921,7 @@ class GWAS:
         for i in chr_list:
             job_name = f"{dsub_job_prefix}-chr{i}"
 
-            plink_input_base = plink_input_folder + f"{plink_input_file_prefix}{i}"
+            plink_input_base = f"{plink_input_folder}/{plink_input_file_prefix}{i}"
             plink_output_base = f"{plink_output_folder}/{dsub_job_prefix}/filtered_{plink_input_file_prefix}{i}"
 
             regenie_output_base = f"{regenie_output_folder}/{dsub_job_prefix}"
