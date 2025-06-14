@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='tctk',
-    version='0.1.32',
+    version='0.1.33',
     package_dir={'': 'src'},
     packages=find_packages(where='src'),
     url='https://github.com/nhgritctran/tctk',
@@ -17,6 +17,6 @@ setup(
         "pyarrow",
         "tableone",
         "tqdm",
-        "yaml"
+        "PyYAML"
     ]
 )

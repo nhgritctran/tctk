@@ -6,4 +6,4 @@ python-dateutil
 setuptools
 tableone
 tqdm
-yaml
+PyYAML
