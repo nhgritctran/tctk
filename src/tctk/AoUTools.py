@@ -855,6 +855,8 @@ class GWAS:
         regenie_input_cov_file_path: str,
         regenie_threads: int = 4,
         regenie_output_folder: str = None,
+        regenie_step1_custom_args: str = None,
+        regenie_step2_custom_args: str = None,
         plink_hwe_threshold: float = 0.000001,
         plink_geno_threshold: float = 0.1,
         plink_mind_threshold: float = 0.1,
@@ -864,6 +866,7 @@ class GWAS:
         plink_input_folder: str = "gs://fc-aou-datasets-controlled/v8/wgs/short_read/snpindel/acaf_threshold/pgen/",
         plink_input_file_prefix: str = "acaf_threshold.chr",
         plink_output_folder: str = None,
+        plink_custom_args: str = None,
         dsub_job_prefix: str = f"dsub_{datetime.datetime.now().strftime('%Y%m%d')}",
         dsub_env_dict=None,
         dsub_machine_type: str = "c4d-highcpu-8",
@@ -890,7 +893,8 @@ class GWAS:
             mind_threshold=plink_mind_threshold,
             maf_threshold=plink_maf_threshold,
             biallelic_only=plink_biallelic_only,
-            split_multi_allelic=plink_split_multi_allelic
+            split_multi_allelic=plink_split_multi_allelic,
+            custom_args=plink_custom_args,
         )
         print()
 
@@ -900,6 +904,8 @@ class GWAS:
         GWAS.generate_regenie_gwas_script(
             script_name=regenie_script_name,
             threads=regenie_threads,
+            step1_custom_args=regenie_step1_custom_args,
+            step2_custom_args=regenie_step2_custom_args,
         )
         print()
 
