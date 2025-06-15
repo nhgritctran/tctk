@@ -141,7 +141,7 @@ class Dsub:
 
         return script
 
-    def check_status(self, full=False, custom_args=None):
+    def check_status(self, full=False, custom_args=None, streaming=False, update_interval=10):
 
         # base command
         check_status = (
@@ -157,7 +157,29 @@ class Dsub:
         if custom_args is not None:
             check_status += f" {custom_args}"
 
-        subprocess.run([check_status], shell=True)
+        if streaming:
+            # Auto-detect notebook
+            try:
+                # noinspection PyUnresolvedReferences
+                from IPython.display import clear_output
+                is_notebook = True
+            except ImportError:
+                is_notebook = False
+
+            while True:
+                # Clear output
+                if is_notebook:
+                    clear_output(wait=True)
+                else:
+                    os.system('clear' if os.name == 'posix' else 'cls')
+
+                # Run command and print output
+                subprocess.run([check_status], shell=True)
+
+                # Wait
+                time.sleep(update_interval)
+        else:
+            subprocess.run([check_status], shell=True)
 
     def view_log(self, log_type="stdout", n_lines=10):
 
