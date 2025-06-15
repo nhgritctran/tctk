@@ -992,11 +992,6 @@ class GWAS:
             update_interval: int = 10,
     ):
         if show_all:
-            for k,v in dsub_jobs.items():
-                assert isinstance(v, Dsub)
-                print(k)
-                v.check_status()
-                print()
             dsub_user = os.getenv("OWNER_EMAIL").split("@")[0]
             command = f"dstat --project $GOOGLE_PROJECT --users {dsub_user} --jobs"
             for v in dsub_jobs.values():
