@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='tctk',
-    version='0.1.40',
+    version='0.1.42',
     package_dir={'': 'src'},
     packages=find_packages(where='src'),
     url='https://github.com/nhgritctran/tctk',

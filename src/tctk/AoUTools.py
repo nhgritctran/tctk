@@ -968,7 +968,7 @@ class GWAS:
         return dsub_jobs
 
     @staticmethod
-    def check_status(dsub_jobs: dict = None, show_all: bool = True, job_name: str = None):
+    def check_status(dsub_jobs: dict = None, show_all: bool = True, job_name: str = None, full: bool = True):
         if show_all:
             for k,v in dsub_jobs.items():
                 assert isinstance(v, Dsub)
@@ -979,7 +979,7 @@ class GWAS:
             if job_name is not None:
                 assert isinstance(dsub_jobs[job_name], Dsub)
                 print(job_name)
-                dsub_jobs[job_name].check_status()
+                dsub_jobs[job_name].check_status(full=full)
                 print()
             else:
                 print("Please provide individual job name to show status. To show all, use show_all=True")
