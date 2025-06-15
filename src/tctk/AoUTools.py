@@ -999,7 +999,7 @@ class GWAS:
             dsub_user = os.getenv("OWNER_EMAIL").split("@")[0]
             command = f"dstat --project $GOOGLE_PROJECT --users {dsub_user} --limit {job_limit}"
             if streaming:
-                GWAS.monitor_loop(cmd=command, interval=update_interval)
+                GWAS.monitor_loop(cmd=[command], interval=update_interval)
             else:
                 subprocess.run([command], shell=True)
         else:
