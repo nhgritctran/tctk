@@ -990,12 +990,13 @@ class GWAS:
             full: bool = True,
             streaming: bool = True,
             update_interval: int = 10,
+            job_limit: int = None
     ):
+        if job_limit is None:
+            job_limit = len(dsub_jobs)
         if show_all:
             dsub_user = os.getenv("OWNER_EMAIL").split("@")[0]
-            command = f"dstat --project $GOOGLE_PROJECT --users {dsub_user} --jobs"
-            for v in dsub_jobs.values():
-                command += f" {v.job_id}"
+            command = f"dstat --project $GOOGLE_PROJECT --users {dsub_user} --status '*' --limit {job_limit}"
             if streaming:
                 # Auto-detect notebook
                 try:
@@ -1013,19 +1014,14 @@ class GWAS:
                         os.system('clear' if os.name == 'posix' else 'cls')
 
                     # Run command and print output
-                    result = subprocess.run([command], capture_output=True)
-                    print(result.stdout)
-                    if result.stderr:
-                        print("ERROR:", result.stderr)
+                    subprocess.run([command], shell=True)
 
                     # Wait
                     time.sleep(update_interval)
 
             else:
-                result = subprocess.run([command], shell=True)
-                print(result.stdout)
-                if result.stderr:
-                    print("ERROR:", result.stderr)
+                subprocess.run([command], shell=True)
+
         else:
             if job_name is not None:
                 assert isinstance(dsub_jobs[job_name], Dsub)
