@@ -6,6 +6,7 @@ import os
 import polars as pl
 import subprocess
 import sys
+import pickle
 import tctk.PolarsTools as PT
 
 
@@ -924,7 +925,7 @@ class GWAS:
             plink_input_base = f"{plink_input_folder}/{plink_input_file_prefix}{i}"
             plink_output_base = f"{plink_output_folder}/{dsub_job_prefix}/filtered_{plink_input_file_prefix}{i}"
 
-            regenie_output_base = f"{regenie_output_folder}/{dsub_job_prefix}"
+            regenie_output_base = f"{regenie_output_folder}/{dsub_job_prefix}_chr{i}"
             regenie_input_pheno = f"{regenie_input_pheno_file_path}"
             regenie_input_cov = f"{regenie_input_cov_file_path}"
 
@@ -955,6 +956,11 @@ class GWAS:
             dsub_jobs[job_name] = dsub_job
             dsub_job.run(show_command=dsub_show_command)
 
+        # Save to file
+        with open(f"{dsub_job_prefix}.pkl", "wb") as f:
+            # noinspection PyTypeChecker
+            pickle.dump(dsub_jobs, f)
+
         print("To check all gwas jobs, use method .check_status(dsub_jobs, show_all=True).\n"
               "For example, if class GWAS was instantiated as gwas = GWAS() and dsub run as dsub_jobs=gwas.run_gwas_dsub,"
               "the command would be gwas.check_status(dsub_jobs, show_all=True)")
@@ -964,8 +970,16 @@ class GWAS:
         print("Similarly, to kill all jobs use gwas.kill(dsub_jobs, kill_all=True),"
               "or gwas.kill(dsub_jobs, kill_all=False, job_name={your_job_name}) to kill an individual job.")
         print()
+        print(f"dsub_jobs dict was saved as {dsub_job_prefix}.pkl. To load, use method .load_pickle(<pickle-file>)")
+        print()
 
         return dsub_jobs
+
+    @staticmethod
+    def load_pickle(file):
+        with open(file, "rb") as f:
+            pickle_obj = pickle.load(f)
+        return pickle_obj
 
     @staticmethod
     def check_status(dsub_jobs: dict = None, show_all: bool = True, job_name: str = None, full: bool = True):
