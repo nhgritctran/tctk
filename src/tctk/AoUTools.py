@@ -2,6 +2,7 @@ from google.cloud import bigquery
 from tableone import TableOne
 
 import datetime
+import keyboard
 import os
 import polars as pl
 import subprocess
@@ -642,7 +643,7 @@ class Demographic:
 class GWAS:
 
     def __init__(self):
-        self.bucket = os.getenv("WORKSPACE_BUCKET")
+        pass
 
     @staticmethod
     def generate_sh_script(script_name, commands):
@@ -924,9 +925,9 @@ class GWAS:
             job_name = f"{dsub_job_prefix}-chr{i}"
 
             plink_input_base = f"{plink_input_folder}/{plink_input_file_prefix}{i}"
-            plink_output_base = f"{plink_output_folder}/{dsub_job_prefix}/filtered_{plink_input_file_prefix}{i}"
+            plink_output_base = f"{plink_output_folder}/{dsub_job_prefix}__filtered_{plink_input_file_prefix}{i}"
 
-            regenie_output_base = f"{regenie_output_folder}/{dsub_job_prefix}_chr{i}"
+            regenie_output_base = f"{regenie_output_folder}/{dsub_job_prefix}__chr{i}"
             regenie_input_pheno = f"{regenie_input_pheno_file_path}"
             regenie_input_cov = f"{regenie_input_cov_file_path}"
 
@@ -1015,6 +1016,12 @@ class GWAS:
 
                     # Run command and print output
                     subprocess.run([command], shell=True)
+                    print()
+                    print("Press ESC to exit.")
+
+                    if keyboard.is_pressed('esc'):
+                        print("\nESC pressed - stopping monitor")
+                        break
 
                     # Wait
                     time.sleep(update_interval)
