@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='tctk',
-    version='0.1.50',
+    version='0.1.51',
     package_dir={'': 'src'},
     packages=find_packages(where='src'),
     url='https://github.com/nhgritctran/tctk',
@@ -13,7 +13,6 @@ setup(
     install_requires=[
         "connectorx",
         "google-cloud-bigquery",
-        "keyboard",
         "polars",
         "pyarrow",
         "tableone",

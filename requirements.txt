@@ -1,6 +1,5 @@
 dsub
 google-cloud-bigquery
-keyboard
 polars
 pyarrow
 python-dateutil

@@ -2,7 +2,6 @@ from google.cloud import bigquery
 from tableone import TableOne
 
 import datetime
-import keyboard
 import os
 import polars as pl
 import subprocess
@@ -1016,12 +1015,6 @@ class GWAS:
 
                     # Run command and print output
                     subprocess.run([command], shell=True)
-                    print()
-                    print("Press ESC to exit.")
-
-                    if keyboard.is_pressed('esc'):
-                        print("\nESC pressed - stopping monitor")
-                        break
 
                     # Wait
                     time.sleep(update_interval)
