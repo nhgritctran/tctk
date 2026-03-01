@@ -1438,13 +1438,15 @@ class GWAS:
             full: bool = True,
             streaming: bool = True,
             update_interval: int = 10,
-            job_limit: int = None
+            job_limit: int = None,
+            provider: str = "google-batch",
+            region: str = "us-central1",
     ):
         if job_limit is None:
             job_limit = len(dsub_jobs)
         if show_all:
             dsub_user = os.getenv("OWNER_EMAIL").split("@")[0]
-            command = f"dstat --project $GOOGLE_PROJECT --users {dsub_user} --status '*' --limit {job_limit}"
+            command = f"dstat --provider {provider} --project $GOOGLE_PROJECT --location {region} --users {dsub_user} --status '*' --limit {job_limit}"
             if streaming:
                 # Auto-detect notebook
                 try:
