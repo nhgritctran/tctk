@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tctk"
+version = "0.1.55"
+description = "A collection of mini tools."
+license = { text = "GPL-3.0" }
+authors = [
+    { name = "Tam Tran", email = "tam.c.tran@outlook.com" }
+]
+urls = { Homepage = "https://github.com/nhgritctran/tctk" }
+dependencies = [
+    "connectorx",
+    "google-cloud-bigquery",
+    "polars",
+    "pyarrow",
+    "tableone",
+    "tqdm",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
