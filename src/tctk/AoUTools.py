@@ -1069,7 +1069,8 @@ class Demographic:
             columns_to_use: list,
             group_by: str,
             missing=False,
-            include_null=True
+            include_null=True,
+            **kwargs
     ):
         # load cohort data
         df = pl.read_csv(cohort_csv_file_path)
