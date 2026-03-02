@@ -3,6 +3,7 @@ from tableone import TableOne
 
 import datetime
 import os
+import pandas as pd
 import polars as pl
 import subprocess
 import sys
@@ -1070,14 +1071,21 @@ class Demographic:
             group_by: str,
             missing=False,
             include_null=True,
+            category_orders: dict = None,  # e.g. {"age": age_order, ...}
             **kwargs
     ):
         # load cohort data
-        df = pl.read_csv(cohort_csv_file_path)
+        df = pl.read_csv(cohort_csv_file_path).to_pandas()[columns_to_use]
+
+        # Force categorical ordering directly on the DataFrame
+        if category_orders:
+            for col, order in category_orders.items():
+                if col in df.columns:
+                    df[col] = pd.Categorical(df[col], categories=order, ordered=True)
 
         # create table one
         table_one = TableOne(
-            data=df[columns_to_use].to_pandas(),
+            data=df,
             groupby=group_by,
             missing=missing,
             include_null=include_null
