@@ -152,6 +152,11 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# OMOP vocab data
+src/tctk/omop/vocab.duckdb
+src/tctk/omop/build_vocab.py
+src/tctk/omop/*.csv
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
