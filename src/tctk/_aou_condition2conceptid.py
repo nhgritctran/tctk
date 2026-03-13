@@ -119,9 +119,28 @@ class Condition2ConceptID:
     # Credential / model management
     # -------------------------------------------------------------------
 
-    def set_api_key(self, key: str) -> None:
-        """Set Gemini API key for AI review."""
-        self._api_key = key
+    def set_api_key(self, key: Optional[str] = None, key_file: Optional[str] = None) -> None:
+        """Set Gemini API key for AI review.
+
+        Parameters
+        ----------
+        key : str, optional
+            API key string directly.
+        key_file : str, optional
+            Path to a JSON file containing {"gemini_api_key": "your-key"}.
+        """
+        if key:
+            self._api_key = key
+        elif key_file:
+            config = json.loads(Path(key_file).read_text())
+            self._api_key = config.get("gemini_api_key")
+            if not self._api_key:
+                raise ValueError(
+                    f"Key file {key_file} missing 'gemini_api_key' field.\n"
+                    'Expected format: {"gemini_api_key": "your-key-here"}'
+                )
+        else:
+            raise ValueError("Provide either key or key_file.")
         self._ai_model = None
 
     @staticmethod
@@ -138,6 +157,9 @@ class Condition2ConceptID:
     def _resolve_model(self) -> str:
         """Detect and cache the best Gemini model for the API key and tier."""
         if self._ai_model is None:
+            # Re-check env var in case it was set after __init__
+            if not self._api_key:
+                self._api_key = load_api_key()
             api_key = check_api_key(self._api_key)
             self._ai_model = detect_best_model(api_key, ai_tier=self._ai_tier)
             print(f"  Gemini model selected: {self._ai_model}")
