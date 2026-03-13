@@ -28,6 +28,9 @@ CONFIG_PATHS = [
 # Gemini tier priority (higher = better)
 _TIER_PRIORITY = {"pro": 3, "flash": 2, "flash-lite": 1}
 
+# Model name substrings to exclude (not suitable for text-only tasks)
+_MODEL_EXCLUSIONS = ["image", "vision", "preview", "embedding", "aqa", "bison"]
+
 
 # -------------------------------------------------------------------
 # SQL helpers
@@ -219,12 +222,21 @@ def setup_credentials(path: Optional[str] = None) -> None:
 def _parse_model_tier(model_name: str) -> Optional[str]:
     """Extract tier from a Gemini model name.
 
+    Excludes image, vision, preview, embedding, and other
+    non-text-generation models.
+
     Examples:
-        "gemini-2.5-pro"       → "pro"
-        "gemini-2.0-flash"     → "flash"
-        "gemini-2.0-flash-lite" → "flash-lite"
+        "gemini-2.5-pro"             → "pro"
+        "gemini-2.5-flash"           → "flash"
+        "gemini-2.0-flash-lite"      → "flash-lite"
+        "gemini-3.1-flash-image-preview" → None (excluded)
     """
     name = model_name.lower()
+
+    # Exclude non-text models
+    if any(excl in name for excl in _MODEL_EXCLUSIONS):
+        return None
+
     if "flash-lite" in name:
         return "flash-lite"
     elif "flash" in name:
@@ -249,7 +261,7 @@ def detect_best_model(
     api_key: str,
     ai_tier: Optional[str] = None,
 ) -> str:
-    """Query Gemini API and select the best available model.
+    """Query Gemini API and select the best available text model.
 
     Parameters
     ----------
@@ -285,7 +297,7 @@ def detect_best_model(
     except Exception as e:
         raise RuntimeError(f"Failed to query Gemini models: {e}") from e
 
-    # Filter to models that support generateContent
+    # Filter to text-generation models only
     candidates = []
     for m in models_data:
         name = m.get("name", "").replace("models/", "")
@@ -307,7 +319,7 @@ def detect_best_model(
 
     if not candidates:
         raise RuntimeError(
-            "No suitable Gemini models found for this API key. "
+            "No suitable Gemini text models found for this API key. "
             "Ensure the Generative Language API is enabled."
         )
 
@@ -341,8 +353,9 @@ def call_gemini(
     temperature: float = 0.0,
     max_output_tokens: int = 1024,
     timeout: int = 30,
+    max_retries: int = 3,
 ) -> str:
-    """Call Gemini API directly via REST (no SDK dependency).
+    """Call Gemini API directly via REST with automatic retry on rate limits.
 
     Parameters
     ----------
@@ -358,6 +371,8 @@ def call_gemini(
         Max tokens in response. Default 1024.
     timeout : int
         Request timeout in seconds. Default 30.
+    max_retries : int
+        Maximum retries on 429 rate limit errors. Default 3.
 
     Returns
     -------
@@ -367,7 +382,7 @@ def call_gemini(
     Raises
     ------
     RuntimeError
-        If the API call fails.
+        If the API call fails after all retries.
     """
     import requests
 
@@ -384,18 +399,51 @@ def call_gemini(
         },
     }
 
-    try:
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except requests.exceptions.HTTPError as e:
-        raise RuntimeError(
-            f"Gemini API error: {e.response.status_code} - {e.response.text}"
-        ) from e
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unexpected Gemini API response format: {e}") from e
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Gemini API request failed: {e}") from e
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+
+            # Handle rate limiting with retry
+            if resp.status_code == 429 and attempt < max_retries:
+                wait = 40  # default wait
+                try:
+                    details = resp.json().get("error", {}).get("details", [])
+                    for d in details:
+                        if d.get("@type", "").endswith("RetryInfo"):
+                            delay_str = d.get("retryDelay", "40s")
+                            wait = int(float(delay_str.rstrip("s"))) + 2
+                            break
+                except Exception:
+                    pass
+                print(
+                    f"    Rate limited. Waiting {wait}s "
+                    f"(retry {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+        except requests.exceptions.HTTPError as e:
+            if resp.status_code == 429:
+                raise RuntimeError(
+                    f"Gemini API rate limit exceeded after {max_retries} retries. "
+                    f"Wait a few minutes and try again."
+                ) from e
+            raise RuntimeError(
+                f"Gemini API error: {e.response.status_code} - {e.response.text}"
+            ) from e
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(
+                f"Unexpected Gemini API response format: {e}"
+            ) from e
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Gemini API request failed: {e}") from e
+
+    raise RuntimeError(
+        f"Gemini API failed after {max_retries} retries"
+    )
 
 
 # -------------------------------------------------------------------
