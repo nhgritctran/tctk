@@ -88,12 +88,13 @@ class Condition2ConceptID:
     def __init__(
         self,
         vocab_db: Optional[str] = None,
+        force_download_db: bool = False,
         fuzzy_threshold: int = 85,
         gemini_api_key: Optional[str] = None,
         ai_tier: str = "flash",
         config_path: Optional[str] = None,
     ):
-        self._vocab_db = Path(vocab_db) if vocab_db else Path(get_vocab_db())
+        self._vocab_db = Path(vocab_db) if vocab_db else Path(get_vocab_db(force_download=force_download_db))
         self.fuzzy_threshold = fuzzy_threshold
         self._api_key = load_api_key(
             api_key=gemini_api_key, config_path=config_path
