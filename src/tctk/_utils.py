@@ -395,7 +395,6 @@ def call_gemini(
         "temperature": temperature,
         "maxOutputTokens": max_output_tokens,
         "responseMimeType": "application/json",
-        "thinkingConfig": {"thinkingBudget": 0},
     }
     if response_schema:
         generation_config["responseSchema"] = response_schema
@@ -429,7 +428,15 @@ def call_gemini(
                 continue
 
             resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            data = resp.json()
+            candidate = data["candidates"][0]
+            finish_reason = candidate.get("finishReason", "")
+            if finish_reason == "MAX_TOKENS":
+                raise RuntimeError(
+                    f"Gemini response truncated (MAX_TOKENS). "
+                    f"Increase max_output_tokens or reduce batch_size."
+                )
+            return candidate["content"]["parts"][0]["text"]
 
         except requests.exceptions.HTTPError as e:
             if resp.status_code == 429:
