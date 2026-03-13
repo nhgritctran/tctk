@@ -1,8 +1,11 @@
 dsub
+duckdb
 google-cloud-bigquery
 polars
 pyarrow
 python-dateutil
+rapidfuzz
+requests
 setuptools
 tableone
 tqdm
