@@ -350,7 +350,7 @@ def call_gemini(
     api_key: str,
     model: str,
     temperature: float = 0.0,
-    max_output_tokens: int = 8192,
+    max_output_tokens: int = 16384,
     timeout: int = 120,
     max_retries: int = 3,
     response_schema: Optional[dict] = None,
@@ -408,22 +408,30 @@ def call_gemini(
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
 
-            # Handle rate limiting with retry
-            if resp.status_code == 429 and attempt < max_retries:
+            # Handle rate limiting (429) and server overload (503) with retry
+            if resp.status_code in (429, 503) and attempt < max_retries:
                 wait = 40  # default wait
+                error_msg = ""
+                quota_info = ""
                 try:
-                    details = resp.json().get("error", {}).get("details", [])
+                    error_body = resp.json().get("error", {})
+                    error_msg = error_body.get("message", "")
+                    details = error_body.get("details", [])
                     for d in details:
                         if d.get("@type", "").endswith("RetryInfo"):
                             delay_str = d.get("retryDelay", "40s")
                             wait = int(float(delay_str.rstrip("s"))) + 2
-                            break
+                        if d.get("@type", "").endswith("QuotaFailure"):
+                            violations = d.get("violations", [])
+                            parts = [f"{v.get('subject', '')}: {v.get('description', '')}" for v in violations]
+                            quota_info = "; ".join(parts)
                 except Exception:
                     pass
-                print(
-                    f"    Rate limited. Waiting {wait}s "
-                    f"(retry {attempt + 1}/{max_retries})..."
-                )
+                label = "Rate limited" if resp.status_code == 429 else "Server overloaded"
+                print(f"    {label} (HTTP {resp.status_code}): {error_msg}")
+                if quota_info:
+                    print(f"    Quota detail: {quota_info}")
+                print(f"    Waiting {wait}s (retry {attempt + 1}/{max_retries})...")
                 time.sleep(wait)
                 continue
 
@@ -439,9 +447,9 @@ def call_gemini(
             return candidate["content"]["parts"][0]["text"]
 
         except requests.exceptions.HTTPError as e:
-            if resp.status_code == 429:
+            if resp.status_code in (429, 503):
                 raise RuntimeError(
-                    f"Gemini API rate limit exceeded after {max_retries} retries. "
+                    f"Gemini API (HTTP {resp.status_code}) failed after {max_retries} retries. "
                     f"Wait a few minutes and try again."
                 ) from e
             raise RuntimeError(
