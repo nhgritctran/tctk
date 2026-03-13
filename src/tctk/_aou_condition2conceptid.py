@@ -599,7 +599,7 @@ class Condition2ConceptID:
         self,
         results: dict,
         single_domain: bool = False,
-        ai_review_batch_size: int = 5,
+        ai_review_batch_size: Optional[int] = None,
     ) -> dict:
         """Enrich mapping results with biological validation data.
 
@@ -886,8 +886,11 @@ class Condition2ConceptID:
                 r["condition_name"] for r in validation_rows
                 if r["validation_status"] in ("review", "plausible", "unvalidated")
             ))
-            est_calls = math.ceil(n_conditions_review / ai_review_batch_size)
-            print(f"\n  AI review estimate: {n_conditions_review} conditions → ~{est_calls} API calls")
+            if ai_review_batch_size is not None:
+                est_calls = math.ceil(n_conditions_review / ai_review_batch_size)
+                print(f"\n  AI review estimate: {n_conditions_review} conditions → ~{est_calls} API calls")
+            else:
+                print(f"\n  AI review estimate: {n_conditions_review} conditions (batch size auto-calculated)")
 
         results["df_ranked"] = df_ranked
         return results
@@ -896,11 +899,30 @@ class Condition2ConceptID:
     # Step 7: AI review via Gemini
     # -------------------------------------------------------------------
 
+    # Estimated tokens per condition for batch size calculation
+    # Input: ~100 tokens (condition name + match lines)
+    # Output: ~50 tokens (verdict JSON per condition)
+    _TOKENS_PER_CONDITION_INPUT = 100
+    _TOKENS_PER_CONDITION_OUTPUT = 50
+    _PROMPT_OVERHEAD_TOKENS = 200
+    _CONTEXT_WINDOW = 1_000_000
+    _MAX_OUTPUT_TOKENS = 65_536
+
+    def _calculate_batch_size(self, n_matches_per_condition: float) -> int:
+        """Calculate max batch size that fits within model limits."""
+        input_per_cond = self._TOKENS_PER_CONDITION_INPUT * max(1, n_matches_per_condition)
+        output_per_cond = self._TOKENS_PER_CONDITION_OUTPUT * max(1, n_matches_per_condition)
+
+        max_by_context = (self._CONTEXT_WINDOW - self._PROMPT_OVERHEAD_TOKENS) // (input_per_cond + output_per_cond)
+        max_by_output = self._MAX_OUTPUT_TOKENS // output_per_cond
+
+        return max(1, min(max_by_context, max_by_output))
+
     def ai_review(
         self,
         results: dict,
         review_filter: Optional[list[str]] = None,
-        batch_size: int = 5,
+        batch_size: Optional[int] = None,
     ) -> dict:
         """AI-assisted review of ambiguous matches using Gemini API.
 
@@ -910,10 +932,8 @@ class Condition2ConceptID:
             Output from enrich() (or map()).
         review_filter : list[str], optional
             Validation statuses to review. Default: ["review", "plausible", "unvalidated"].
-        batch_size : int
-            Conditions per API call. Default 5.
-        user_id : str
-            User identifier for rate limiting. Default "default".
+        batch_size : int, optional
+            Conditions per API call. If None, auto-calculated from model limits.
 
         Returns
         -------
@@ -945,10 +965,17 @@ class Condition2ConceptID:
 
         conditions_to_review = df_to_review["condition_name"].unique().to_list()
         n_conditions = len(conditions_to_review)
+
+        # Auto-calculate batch size if not provided
+        if batch_size is None:
+            avg_matches = len(df_to_review) / max(1, n_conditions)
+            batch_size = self._calculate_batch_size(avg_matches)
+
         est_calls = math.ceil(n_conditions / batch_size)
 
         print(f"  Conditions for AI review: {n_conditions}")
-        print(f"  Estimated API calls: {est_calls} (batch_size={batch_size})")
+        print(f"  Batch size: {batch_size} ({'user-specified' if batch_size else 'auto-calculated'})")
+        print(f"  Estimated API calls: {est_calls}")
         print(f"  Model: {model}")
 
         cond_batches = [
