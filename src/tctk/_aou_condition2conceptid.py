@@ -37,6 +37,7 @@ Usage:
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -960,12 +961,17 @@ class Condition2ConceptID:
 
         for batch in tqdm(cond_batches, desc="AI review batches"):
             prompt_parts = [
-                "You are a medical terminology validator. "
-                "Given conditions and candidate SNOMED matches, respond ONLY "
-                "with a JSON array.\n"
-                'Each entry: {"condition":"name","id":"concept_id",'
-                '"v":"accept|reject","r":"reason in ≤10 words"}\n'
-                "No other text.\n\n"
+                "You are a medical terminology validator.\n"
+                "Given conditions and their candidate SNOMED matches, return a JSON array.\n"
+                "Each element must have exactly these keys:\n"
+                '  "condition" (string): the condition name\n'
+                '  "id" (string): the SNOMED concept_id\n'
+                '  "v" (string): one of "accept", "reject"\n'
+                '  "r" (string): reason in 10 words or fewer\n\n'
+                "Rules:\n"
+                "- Output ONLY valid JSON. No markdown, no explanation, no commentary.\n"
+                "- Do not wrap in code fences.\n"
+                '- Example: [{"condition":"Lupus","id":"55464009","v":"accept","r":"Exact match"}]\n\n'
             ]
 
             for cond in batch:
@@ -999,18 +1005,20 @@ class Condition2ConceptID:
                     calls_used += 1
 
                     clean = response_text.strip()
+                    # Strip thinking tags (e.g., <think>...</think>)
+                    clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
                     # Strip markdown code fences (```json ... ``` or ``` ... ```)
-                    if clean.startswith("```"):
-                        clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
-                    if clean.endswith("```"):
-                        clean = clean.rsplit("```", 1)[0]
+                    clean = re.sub(r"^```\w*\n?", "", clean)
+                    clean = re.sub(r"\n?```\s*$", "", clean)
                     clean = clean.strip()
 
-                    # Try to extract JSON array if surrounded by other text
+                    # Extract JSON array from surrounding text
                     start = clean.find("[")
                     end = clean.rfind("]")
                     if start != -1 and end != -1:
                         clean = clean[start:end + 1]
+                    # Fix trailing commas before ] (common LLM mistake)
+                    clean = re.sub(r",\s*]", "]", clean)
 
                     verdicts = json.loads(clean)
                     if isinstance(verdicts, list):
