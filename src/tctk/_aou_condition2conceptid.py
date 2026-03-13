@@ -923,6 +923,7 @@ class Condition2ConceptID:
         results: dict,
         review_filter: Optional[list[str]] = None,
         batch_size: Optional[int] = None,
+        confidence_threshold: int = 80,
     ) -> dict:
         """AI-assisted review of ambiguous matches using Gemini API.
 
@@ -934,11 +935,14 @@ class Condition2ConceptID:
             Validation statuses to review. Default: ["review", "plausible", "unvalidated"].
         batch_size : int, optional
             Conditions per API call. If None, auto-calculated from model limits.
+        confidence_threshold : int
+            Confidence score (0-100) below which verdicts are flagged as
+            "human review". Default 80.
 
         Returns
         -------
         dict
-            Updated results with ai_verdict and ai_reason columns.
+            Updated results with ai_verdict, ai_reason, and ai_confidence columns.
         """
         model = self._resolve_model()
         df_ranked = results["df_ranked"].clone()
@@ -959,6 +963,7 @@ class Condition2ConceptID:
             df_ranked = df_ranked.with_columns(
                 pl.lit(None).cast(pl.Utf8).alias("ai_verdict"),
                 pl.lit(None).cast(pl.Utf8).alias("ai_reason"),
+                pl.lit(None).cast(pl.Int64).alias("ai_confidence"),
             )
             results["df_ranked"] = df_ranked
             return results
@@ -996,8 +1001,9 @@ class Condition2ConceptID:
                             "id": {"type": "STRING"},
                             "v": {"type": "STRING", "enum": ["accept", "reject"]},
                             "r": {"type": "STRING"},
+                            "c": {"type": "INTEGER"},
                         },
-                        "required": ["condition", "id", "v", "r"],
+                        "required": ["condition", "id", "v", "r", "c"],
                     },
                 }
             },
@@ -1010,6 +1016,7 @@ class Condition2ConceptID:
         for batch in tqdm(cond_batches, desc="AI review batches"):
             prompt_parts = [
                 "For each condition-match pair, decide accept or reject.\n"
+                "Rate confidence 0-100 (100 = certain).\n"
                 "Reason must be 10 words or fewer.\n\n"
             ]
 
@@ -1055,32 +1062,52 @@ class Condition2ConceptID:
             verdict_rows = [
                 {
                     "snomed_concept_id": str(v.get("id", "")),
-                    "ai_verdict": v.get("v", "review"),
+                    "ai_verdict": v.get("v", "human review"),
                     "ai_reason": v.get("r", ""),
+                    "ai_confidence": v.get("c"),
                 }
                 for v in all_verdicts
             ]
             df_verdicts = pl.DataFrame(verdict_rows).unique(subset=["snomed_concept_id"])
+
+            # Flag low-confidence verdicts as "human review"
+            df_verdicts = df_verdicts.with_columns(
+                pl.when(
+                    pl.col("ai_confidence").is_not_null()
+                    & (pl.col("ai_confidence") < confidence_threshold)
+                )
+                .then(pl.lit("human review"))
+                .otherwise(pl.col("ai_verdict"))
+                .alias("ai_verdict")
+            )
+
             df_ranked = df_ranked.join(df_verdicts, on="snomed_concept_id", how="left")
         else:
             df_ranked = df_ranked.with_columns(
                 pl.lit(None).cast(pl.Utf8).alias("ai_verdict"),
                 pl.lit(None).cast(pl.Utf8).alias("ai_reason"),
+                pl.lit(None).cast(pl.Int64).alias("ai_confidence"),
             )
 
-        n_accept = len([v for v in all_verdicts if v.get("v") == "accept"])
-        n_reject = len([v for v in all_verdicts if v.get("v") == "reject"])
-        n_review = len([v for v in all_verdicts if v.get("v") == "review"])
+        # Count final verdicts (after confidence thresholding)
+        if all_verdicts:
+            final_verdicts = df_verdicts["ai_verdict"].to_list()
+        else:
+            final_verdicts = []
+        n_accept = final_verdicts.count("accept")
+        n_reject = final_verdicts.count("reject")
+        n_human_review = final_verdicts.count("human review")
 
         print(f"\n{'=' * 40}")
         print(f"  AI REVIEW SUMMARY")
         print(f"{'=' * 40}")
-        print(f"  Model used:      {model}")
-        print(f"  API calls used:  {calls_used}")
-        print(f"  Verdicts:        {len(all_verdicts)} total")
-        print(f"    accept:        {n_accept}")
-        print(f"    reject:        {n_reject}")
-        print(f"    review:        {n_review}")
+        print(f"  Model used:        {model}")
+        print(f"  API calls used:    {calls_used}")
+        print(f"  Confidence cutoff: {confidence_threshold}")
+        print(f"  Verdicts:          {len(all_verdicts)} total")
+        print(f"    accept:          {n_accept}")
+        print(f"    reject:          {n_reject}")
+        print(f"    human review:    {n_human_review}")
         print(f"{'=' * 40}")
 
         results["df_ranked"] = df_ranked
