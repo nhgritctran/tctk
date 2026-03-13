@@ -33,9 +33,10 @@ _TIER_PRIORITY = {"pro": 3, "flash": 2, "flash-lite": 1}
 # SQL helpers
 # -------------------------------------------------------------------
 
+# DuckDB / standard SQL style
 def sql_escape(s: str) -> str:
-    """Escape backslashes and single quotes for SQL string literals."""
-    return s.replace("\\", "\\\\").replace("'", "\\'")
+    """Escape single quotes for DuckDB SQL string literals."""
+    return s.replace("'", "''")
 
 
 # -------------------------------------------------------------------
