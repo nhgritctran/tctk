@@ -53,7 +53,6 @@ from tctk._utils import (
     setup_credentials,
     detect_best_model,
     call_gemini,
-    RateLimiter,
 )
 from tctk.omop import get_vocab_db
 
@@ -100,7 +99,6 @@ class Condition2ConceptID:
         )
         self._ai_tier = ai_tier
         self._ai_model: Optional[str] = None
-        self._rate_limiter = RateLimiter()
 
     # -------------------------------------------------------------------
     # DuckDB query helper
@@ -902,7 +900,6 @@ class Condition2ConceptID:
         results: dict,
         review_filter: Optional[list[str]] = None,
         batch_size: int = 5,
-        user_id: str = "default",
     ) -> dict:
         """AI-assisted review of ambiguous matches using Gemini API.
 
@@ -962,11 +959,6 @@ class Condition2ConceptID:
         calls_used = 0
 
         for batch in tqdm(cond_batches, desc="AI review batches"):
-            allowed, msg = self._rate_limiter.check(user_id)
-            if not allowed:
-                print(f"  Rate limited: {msg}. Stopping.")
-                break
-
             prompt_parts = [
                 "You are a medical terminology validator. "
                 "Given conditions and candidate SNOMED matches, respond ONLY "
@@ -1000,24 +992,38 @@ class Condition2ConceptID:
 
             prompt = "\n".join(prompt_parts)
 
-            try:
-                response_text = call_gemini(prompt, check_api_key(self._api_key), model)
-                calls_used += 1
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    response_text = call_gemini(prompt, check_api_key(self._api_key), model)
+                    calls_used += 1
 
-                clean = response_text.strip()
-                if clean.startswith("```"):
-                    clean = clean.split("\n", 1)[1] if "\n" in clean else clean
-                if clean.endswith("```"):
-                    clean = clean.rsplit("```", 1)[0]
-                clean = clean.strip()
+                    clean = response_text.strip()
+                    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+                    if clean.startswith("```"):
+                        clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+                    if clean.endswith("```"):
+                        clean = clean.rsplit("```", 1)[0]
+                    clean = clean.strip()
 
-                verdicts = json.loads(clean)
-                if isinstance(verdicts, list):
-                    all_verdicts.extend(verdicts)
-            except Exception as e:
-                calls_used += 1
-                print(f"  AI review error for batch: {e}")
-                continue
+                    # Try to extract JSON array if surrounded by other text
+                    start = clean.find("[")
+                    end = clean.rfind("]")
+                    if start != -1 and end != -1:
+                        clean = clean[start:end + 1]
+
+                    verdicts = json.loads(clean)
+                    if isinstance(verdicts, list):
+                        all_verdicts.extend(verdicts)
+                    break
+                except json.JSONDecodeError as e:
+                    if attempt < max_retries:
+                        continue
+                    print(f"  AI review error for batch: {e}")
+                except Exception as e:
+                    calls_used += 1
+                    print(f"  AI review error for batch: {e}")
+                    break
 
         if all_verdicts:
             verdict_rows = [
