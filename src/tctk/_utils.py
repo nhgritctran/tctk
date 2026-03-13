@@ -351,7 +351,7 @@ def call_gemini(
     model: str,
     temperature: float = 0.0,
     max_output_tokens: int = 65536,
-    timeout: int = 120,
+    timeout: int = 300,
     max_retries: int = 3,
     response_schema: Optional[dict] = None,
 ) -> str:
