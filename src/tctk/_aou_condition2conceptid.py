@@ -916,7 +916,7 @@ class Condition2ConceptID:
         max_by_context = (self._CONTEXT_WINDOW - self._PROMPT_OVERHEAD_TOKENS) // (input_per_cond + output_per_cond)
         max_by_output = self._MAX_OUTPUT_TOKENS // output_per_cond
 
-        return max(1, min(max_by_context, max_by_output))
+        return int(max(1, min(max_by_context, max_by_output)))
 
     def ai_review(
         self,
