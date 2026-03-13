@@ -396,6 +396,8 @@ def call_gemini(
         "generationConfig": {
             "temperature": temperature,
             "maxOutputTokens": max_output_tokens,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
 
