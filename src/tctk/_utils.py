@@ -8,7 +8,6 @@ import json
 import os
 import re
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -351,9 +350,10 @@ def call_gemini(
     api_key: str,
     model: str,
     temperature: float = 0.0,
-    max_output_tokens: int = 1024,
+    max_output_tokens: int = 8192,
     timeout: int = 30,
     max_retries: int = 3,
+    response_schema: Optional[dict] = None,
 ) -> str:
     """Call Gemini API directly via REST with automatic retry on rate limits.
 
@@ -391,14 +391,18 @@ def call_gemini(
         f"{model}:generateContent?key={api_key}"
     )
 
+    generation_config = {
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens,
+        "responseMimeType": "application/json",
+        "thinkingConfig": {"thinkingBudget": 0},
+    }
+    if response_schema:
+        generation_config["responseSchema"] = response_schema
+
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-            "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
+        "generationConfig": generation_config,
     }
 
     for attempt in range(max_retries + 1):
@@ -446,46 +450,3 @@ def call_gemini(
     raise RuntimeError(
         f"Gemini API failed after {max_retries} retries"
     )
-
-
-# -------------------------------------------------------------------
-# Rate limiter
-# -------------------------------------------------------------------
-
-class RateLimiter:
-    """Per-user rate limiter with daily quota and per-minute burst control.
-
-    Parameters
-    ----------
-    daily_limit : int
-        Maximum API calls per user per day. Default 50.
-    rpm_limit : int
-        Maximum API calls per user per minute. Default 5.
-    """
-
-    def __init__(self, daily_limit: int = 50, rpm_limit: int = 5):
-        self.daily_limit = daily_limit
-        self.rpm_limit = rpm_limit
-        self._daily_counts: dict = defaultdict(lambda: {"count": 0, "reset": 0.0})
-        self._minute_log: dict = defaultdict(list)
-
-    def check(self, user_id: str = "default") -> tuple[bool, str]:
-        """Check if a request is allowed for the given user."""
-        now = time.time()
-
-        daily = self._daily_counts[user_id]
-        if now - daily["reset"] > 86400:
-            daily["count"] = 0
-            daily["reset"] = now
-
-        if daily["count"] >= self.daily_limit:
-            return False, "Daily AI review limit reached"
-
-        minute_calls = [t for t in self._minute_log[user_id] if now - t < 60]
-        self._minute_log[user_id] = minute_calls
-        if len(minute_calls) >= self.rpm_limit:
-            return False, "Too many requests per minute, please wait"
-
-        daily["count"] += 1
-        self._minute_log[user_id].append(now)
-        return True, "ok"

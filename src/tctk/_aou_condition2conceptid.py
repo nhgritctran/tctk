@@ -37,7 +37,6 @@ Usage:
 import json
 import math
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -957,22 +956,34 @@ class Condition2ConceptID:
             for i in range(0, len(conditions_to_review), batch_size)
         ]
 
+        # Schema for structured Gemini response
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "verdicts": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "condition": {"type": "STRING"},
+                            "id": {"type": "STRING"},
+                            "v": {"type": "STRING", "enum": ["accept", "reject"]},
+                            "r": {"type": "STRING"},
+                        },
+                        "required": ["condition", "id", "v", "r"],
+                    },
+                }
+            },
+            "required": ["verdicts"],
+        }
+
         all_verdicts = []
         calls_used = 0
 
         for batch in tqdm(cond_batches, desc="AI review batches"):
             prompt_parts = [
-                "You are a medical terminology validator.\n"
-                "Given conditions and their candidate SNOMED matches, return a JSON array.\n"
-                "Each element must have exactly these keys:\n"
-                '  "condition" (string): the condition name\n'
-                '  "id" (string): the SNOMED concept_id\n'
-                '  "v" (string): one of "accept", "reject"\n'
-                '  "r" (string): reason in 10 words or fewer\n\n'
-                "Rules:\n"
-                "- Output ONLY valid JSON. No markdown, no explanation, no commentary.\n"
-                "- Do not wrap in code fences.\n"
-                '- Example: [{"condition":"Lupus","id":"55464009","v":"accept","r":"Exact match"}]\n\n'
+                "For each condition-match pair, decide accept or reject.\n"
+                "Reason must be 10 words or fewer.\n\n"
             ]
 
             for cond in batch:
@@ -999,40 +1010,19 @@ class Condition2ConceptID:
 
             prompt = "\n".join(prompt_parts)
 
-            max_retries = 2
-            for attempt in range(max_retries + 1):
-                try:
-                    response_text = call_gemini(prompt, check_api_key(self._api_key), model)
-                    calls_used += 1
+            try:
+                response_text = call_gemini(
+                    prompt, check_api_key(self._api_key), model,
+                    response_schema=response_schema,
+                )
+                calls_used += 1
 
-                    clean = response_text.strip()
-                    # Strip thinking tags (e.g., <think>...</think>)
-                    clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
-                    # Strip markdown code fences (```json ... ``` or ``` ... ```)
-                    clean = re.sub(r"^```\w*\n?", "", clean)
-                    clean = re.sub(r"\n?```\s*$", "", clean)
-                    clean = clean.strip()
-
-                    # Extract JSON array from surrounding text
-                    start = clean.find("[")
-                    end = clean.rfind("]")
-                    if start != -1 and end != -1:
-                        clean = clean[start:end + 1]
-                    # Fix trailing commas before ] (common LLM mistake)
-                    clean = re.sub(r",\s*]", "]", clean)
-
-                    verdicts = json.loads(clean)
-                    if isinstance(verdicts, list):
-                        all_verdicts.extend(verdicts)
-                    break
-                except json.JSONDecodeError as e:
-                    if attempt < max_retries:
-                        continue
-                    print(f"  AI review error for batch: {e}")
-                except Exception as e:
-                    calls_used += 1
-                    print(f"  AI review error for batch: {e}")
-                    break
+                parsed = json.loads(response_text.strip())
+                verdicts = parsed.get("verdicts", [])
+                all_verdicts.extend(verdicts)
+            except Exception as e:
+                calls_used += 1
+                print(f"  AI review error for batch: {e}")
 
         if all_verdicts:
             verdict_rows = [
