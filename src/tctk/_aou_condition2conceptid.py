@@ -1022,7 +1022,12 @@ class Condition2ConceptID:
 
         for batch in tqdm(cond_batches, desc="AI review batches"):
             prompt_parts = [
-                "For each condition-match pair, decide accept or reject.\n"
+                "You are validating SNOMED concept matches for clinical conditions.\n"
+                "For each condition-match pair, decide if the SNOMED concept is a "
+                "clinically appropriate match for the condition.\n"
+                "Accept if the concept captures the same clinical meaning. "
+                "Reject if it refers to a different condition, wrong body site, "
+                "wrong specificity, or unrelated finding.\n"
                 "Rate confidence 0-100 (100 = certain).\n"
                 "Reason must be 10 words or fewer.\n\n"
             ]
@@ -1068,6 +1073,7 @@ class Condition2ConceptID:
         if all_verdicts:
             verdict_rows = [
                 {
+                    "condition_name": v.get("condition", ""),
                     "snomed_concept_id": str(v.get("id", "")),
                     "ai_verdict": v.get("v", "human review"),
                     "ai_reason": v.get("r", ""),
@@ -1075,7 +1081,9 @@ class Condition2ConceptID:
                 }
                 for v in all_verdicts
             ]
-            df_verdicts = pl.DataFrame(verdict_rows).unique(subset=["snomed_concept_id"])
+            df_verdicts = pl.DataFrame(verdict_rows).unique(
+                subset=["condition_name", "snomed_concept_id"]
+            )
 
             # Flag low-confidence verdicts as "human review"
             df_verdicts = df_verdicts.with_columns(
@@ -1088,7 +1096,9 @@ class Condition2ConceptID:
                 .alias("ai_verdict")
             )
 
-            df_ranked = df_ranked.join(df_verdicts, on="snomed_concept_id", how="left")
+            df_ranked = df_ranked.join(
+                df_verdicts, on=["condition_name", "snomed_concept_id"], how="left"
+            )
         else:
             df_ranked = df_ranked.with_columns(
                 pl.lit(None).cast(pl.Utf8).alias("ai_verdict"),
@@ -1108,11 +1118,15 @@ class Condition2ConceptID:
         n_cond_accepted = df_reviewed.filter(
             pl.col("ai_verdict") == "accept"
         )["condition_name"].n_unique()
+        conds_with_accept = set(
+            df_reviewed.filter(pl.col("ai_verdict") == "accept")["condition_name"].to_list()
+        )
         n_cond_rejected = df_reviewed.filter(
             (pl.col("ai_verdict") == "reject")
-            & ~pl.col("condition_name").is_in(
-                df_reviewed.filter(pl.col("ai_verdict") == "accept")["condition_name"]
-            )
+            & ~pl.col("condition_name").is_in(list(conds_with_accept))
+        )["condition_name"].n_unique()
+        n_cond_human_review = df_reviewed.filter(
+            pl.col("ai_verdict") == "human review"
         )["condition_name"].n_unique()
 
         print(f"\n{'=' * 40}")
@@ -1124,7 +1138,7 @@ class Condition2ConceptID:
         print(f"  Total hits reviewed: {n_total}")
         print(f"    accepted:        {n_accepted_hits} hits ({n_cond_accepted} conditions with at least 1 hit)")
         print(f"    rejected:        {n_rejected_hits} hits ({n_cond_rejected} conditions lost all hits)")
-        print(f"    human review:    {n_human_review_hits} hits")
+        print(f"    human review:    {n_human_review_hits} hits ({n_cond_human_review} conditions)")
         print(f"{'=' * 40}")
 
         results["df_ranked"] = df_ranked
