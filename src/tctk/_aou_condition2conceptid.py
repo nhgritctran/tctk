@@ -852,12 +852,25 @@ class Condition2ConceptID:
 
         # Join results
         if validation_rows:
-            df_validation = pl.DataFrame(validation_rows)
+            df_validation = (
+                pl.DataFrame(validation_rows)
+                .unique(subset=["condition_name", "search_term", "snomed_concept_id"])
+            )
+            n_before = len(df_ranked)
             df_ranked = df_ranked.join(
                 df_validation,
                 on=["condition_name", "search_term", "snomed_concept_id"],
                 how="left",
             )
+            if len(df_ranked) != n_before:
+                print(
+                    f"  Warning: validation join changed row count "
+                    f"({n_before} → {len(df_ranked)}). "
+                    f"Deduplicating..."
+                )
+                df_ranked = df_ranked.unique(
+                    subset=["condition_name", "search_term", "snomed_concept_id"]
+                )
         else:
             df_ranked = df_ranked.with_columns(
                 pl.lit(None).cast(pl.Int64).alias("ancestor_distance"),
@@ -875,19 +888,19 @@ class Condition2ConceptID:
         else:
             df_ranked = df_ranked.with_columns(pl.lit(None).cast(pl.Utf8).alias("associated_morphology"))
 
-        # Summary
-        if validation_rows:
-            df_val = pl.DataFrame(validation_rows)
+        # Summary (count from final df_ranked — matches what AI review will receive)
+        df_with_status = df_ranked.filter(pl.col("validation_status").is_not_null())
+        if len(df_with_status) > 0:
             status_order = ["confirmed", "plausible", "weak_match", "no_reference"]
             status_counts = dict(
-                df_val.group_by("validation_status").len().iter_rows()
+                df_with_status.group_by("validation_status").len().iter_rows()
             )
             print(f"\n  Validation status distribution:")
             for status in status_order:
                 if status in status_counts:
-                    print(f"    {status} ({status_counts[status]})")
+                    print(f"    {status}: {status_counts[status]}")
 
-            df_for_review = df_val.filter(
+            df_for_review = df_with_status.filter(
                 pl.col("validation_status").is_in(["weak_match", "plausible", "no_reference"])
             )
             n_matches_review = len(df_for_review)
@@ -992,7 +1005,7 @@ class Condition2ConceptID:
                 df_to_review.group_by("validation_status").len().iter_rows()
             )
             status_parts = [
-                f"{s}: {status_counts[s]}" for s in to_be_reviewed if s in status_counts
+                f"{s} ({status_counts[s]})" for s in to_be_reviewed if s in status_counts
             ]
             print(f"  Reviewing: {', '.join(status_parts)}")
         else:
@@ -1018,12 +1031,13 @@ class Condition2ConceptID:
                         "type": "OBJECT",
                         "properties": {
                             "condition": {"type": "STRING"},
+                            "t": {"type": "STRING"},
                             "id": {"type": "STRING"},
                             "v": {"type": "STRING", "enum": ["accept", "reject"]},
                             "r": {"type": "STRING"},
                             "c": {"type": "INTEGER"},
                         },
-                        "required": ["condition", "id", "v", "r", "c"],
+                        "required": ["condition", "t", "id", "v", "r", "c"],
                     },
                 }
             },
@@ -1035,10 +1049,11 @@ class Condition2ConceptID:
 
         for batch in tqdm(cond_batches, desc="AI review batches"):
             prompt_parts = [
-                "You are validating SNOMED concept matches for clinical conditions.\n"
-                "For each condition-match pair, decide if the SNOMED concept is a "
-                "clinically appropriate match for the condition.\n"
-                "Accept if the concept captures the same clinical meaning. "
+                "You are validating fuzzy matches between search terms and SNOMED concepts.\n"
+                "Each entry shows: term (search term derived from the condition) and "
+                "matched (SNOMED concept name found by fuzzy matching).\n"
+                "Accept if the matched SNOMED concept captures the same clinical meaning "
+                "as the search term in the context of the condition.\n"
                 "Reject if it refers to a different condition, wrong body site, "
                 "wrong specificity, or unrelated finding.\n"
                 "Rate confidence 0-100 (100 = certain).\n"
@@ -1047,11 +1062,14 @@ class Condition2ConceptID:
 
             for cond in batch:
                 cond_rows = df_to_review.filter(pl.col("condition_name") == cond)
-                matches_lines = []
+                prompt_parts.append(f"Condition: {cond}")
+
                 for row in cond_rows.iter_rows(named=True):
+                    search_term = row.get("search_term", "")
                     parts_line = [
+                        f"term={search_term}",
+                        f"matched={row.get('snomed_concept_name', '')}",
                         f"id={row['snomed_concept_id']}",
-                        f"name={row.get('snomed_concept_name', '')}",
                         f"fuzzy={row['match_score']}",
                     ]
                     if row.get("ancestor_distance") is not None:
@@ -1060,11 +1078,8 @@ class Condition2ConceptID:
                         parts_line.append(f"site={row['finding_site']}")
                     if row.get("associated_morphology"):
                         parts_line.append(f"morphology={row['associated_morphology']}")
-                    matches_lines.append(" | ".join(parts_line))
+                    prompt_parts.append(" | ".join(parts_line))
 
-                prompt_parts.append(f"Condition: {cond}")
-                prompt_parts.append("Matches:")
-                prompt_parts.extend(matches_lines)
                 prompt_parts.append("")
 
             prompt = "\n".join(prompt_parts)
@@ -1087,6 +1102,7 @@ class Condition2ConceptID:
             verdict_rows = [
                 {
                     "condition_name": v.get("condition", ""),
+                    "search_term": v.get("t", ""),
                     "snomed_concept_id": str(v.get("id", "")),
                     "ai_verdict": v.get("v", "human review"),
                     "ai_reason": v.get("r", ""),
@@ -1095,7 +1111,7 @@ class Condition2ConceptID:
                 for v in all_verdicts
             ]
             df_verdicts = pl.DataFrame(verdict_rows).unique(
-                subset=["condition_name", "snomed_concept_id"]
+                subset=["condition_name", "search_term", "snomed_concept_id"]
             )
 
             # Flag low-confidence verdicts as "human review"
@@ -1110,7 +1126,9 @@ class Condition2ConceptID:
             )
 
             df_ranked = df_ranked.join(
-                df_verdicts, on=["condition_name", "snomed_concept_id"], how="left"
+                df_verdicts,
+                on=["condition_name", "search_term", "snomed_concept_id"],
+                how="left",
             )
         else:
             df_ranked = df_ranked.with_columns(
@@ -1120,9 +1138,11 @@ class Condition2ConceptID:
             )
 
         # Count final verdicts (only rows that were sent for review)
-        df_reviewed = df_ranked.filter(
-            pl.col("ai_verdict").is_not_null()
-            & pl.col("validation_status").is_in(to_be_reviewed)
+        df_reviewed = (
+            df_ranked.filter(
+                pl.col("ai_verdict").is_not_null()
+                & pl.col("validation_status").is_in(to_be_reviewed)
+            )
         )
 
         n_accepted = len(df_reviewed.filter(pl.col("ai_verdict") == "accept"))
