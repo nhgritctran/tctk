@@ -878,9 +878,14 @@ class Condition2ConceptID:
         # Summary
         if validation_rows:
             df_val = pl.DataFrame(validation_rows)
+            status_order = ["confirmed", "plausible", "weak_match", "no_reference"]
+            status_counts = dict(
+                df_val.group_by("validation_status").len().iter_rows()
+            )
             print(f"\n  Validation status distribution:")
-            for row in df_val.group_by("validation_status").len().sort("validation_status").iter_rows(named=True):
-                print(f"    {row['validation_status']}: {row['len']}")
+            for status in status_order:
+                if status in status_counts:
+                    print(f"    {status}: {status_counts[status]}")
 
             n_conditions_review = len(set(
                 r["condition_name"] for r in validation_rows
@@ -921,7 +926,7 @@ class Condition2ConceptID:
     def ai_review(
         self,
         results: dict,
-        review_filter: Optional[list[str]] = None,
+        to_be_reviewed: Optional[list[str]] = None,
         batch_size: Optional[int] = None,
         confidence_threshold: int = 80,
     ) -> dict:
@@ -931,8 +936,9 @@ class Condition2ConceptID:
         ----------
         results : dict
             Output from enrich() (or map()).
-        review_filter : list[str], optional
-            Validation statuses to review. Default: ["weak_match", "plausible", "no_reference"].
+        to_be_reviewed : list[str], optional
+            Validation statuses to send for AI review.
+            Default: ["weak_match", "plausible", "no_reference"].
         batch_size : int, optional
             Conditions per API call. If None, auto-calculated from model limits.
         confidence_threshold : int
@@ -947,12 +953,12 @@ class Condition2ConceptID:
         model = self._resolve_model()
         df_ranked = results["df_ranked"].clone()
 
-        if review_filter is None:
-            review_filter = ["weak_match", "plausible", "no_reference"]
+        if to_be_reviewed is None:
+            to_be_reviewed = ["weak_match", "plausible", "no_reference"]
 
         if "validation_status" in df_ranked.columns:
             df_to_review = df_ranked.filter(
-                pl.col("validation_status").is_in(review_filter)
+                pl.col("validation_status").is_in(to_be_reviewed)
                 & pl.col("snomed_concept_id").is_not_null()
             )
         else:
@@ -978,6 +984,7 @@ class Condition2ConceptID:
 
         est_calls = math.ceil(n_conditions / batch_size)
 
+        print(f"  Reviewing: {', '.join(to_be_reviewed)}")
         print(f"  Conditions for AI review: {n_conditions}")
         print(f"  Batch size: {batch_size} ({'user-specified' if batch_size else 'auto-calculated'})")
         print(f"  Estimated API calls: {est_calls}")
@@ -1090,13 +1097,23 @@ class Condition2ConceptID:
             )
 
         # Count final verdicts (after confidence thresholding)
-        if all_verdicts:
-            final_verdicts = df_verdicts["ai_verdict"].to_list()
-        else:
-            final_verdicts = []
-        n_accept = final_verdicts.count("accept")
-        n_reject = final_verdicts.count("reject")
-        n_human_review = final_verdicts.count("human review")
+        # Use df_ranked (post-join) so we can count by condition
+        df_reviewed = df_ranked.filter(pl.col("ai_verdict").is_not_null())
+
+        n_accepted_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "accept"))
+        n_rejected_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "reject"))
+        n_human_review_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "human review"))
+        n_total = n_accepted_hits + n_rejected_hits + n_human_review_hits
+
+        n_cond_accepted = df_reviewed.filter(
+            pl.col("ai_verdict") == "accept"
+        )["condition_name"].n_unique()
+        n_cond_rejected = df_reviewed.filter(
+            (pl.col("ai_verdict") == "reject")
+            & ~pl.col("condition_name").is_in(
+                df_reviewed.filter(pl.col("ai_verdict") == "accept")["condition_name"]
+            )
+        )["condition_name"].n_unique()
 
         print(f"\n{'=' * 40}")
         print(f"  AI REVIEW SUMMARY")
@@ -1104,10 +1121,10 @@ class Condition2ConceptID:
         print(f"  Model used:        {model}")
         print(f"  API calls used:    {calls_used}")
         print(f"  Confidence cutoff: {confidence_threshold}")
-        print(f"  Verdicts:          {len(all_verdicts)} total")
-        print(f"    accept:          {n_accept}")
-        print(f"    reject:          {n_reject}")
-        print(f"    human review:    {n_human_review}")
+        print(f"  Total hits reviewed: {n_total}")
+        print(f"    accepted:        {n_accepted_hits} hits ({n_cond_accepted} conditions with at least 1 hit)")
+        print(f"    rejected:        {n_rejected_hits} hits ({n_cond_rejected} conditions lost all hits)")
+        print(f"    human review:    {n_human_review_hits} hits")
         print(f"{'=' * 40}")
 
         results["df_ranked"] = df_ranked
