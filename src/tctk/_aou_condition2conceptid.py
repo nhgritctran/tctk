@@ -887,15 +887,17 @@ class Condition2ConceptID:
                 if status in status_counts:
                     print(f"    {status}: {status_counts[status]}")
 
-            n_conditions_review = len(set(
-                r["condition_name"] for r in validation_rows
+            review_rows = [
+                r for r in validation_rows
                 if r["validation_status"] in ("weak_match", "plausible", "no_reference")
-            ))
+            ]
+            n_hits_review = len(review_rows)
+            n_conditions_review = len(set(r["condition_name"] for r in review_rows))
             if ai_review_batch_size is not None:
                 est_calls = math.ceil(n_conditions_review / ai_review_batch_size)
-                print(f"\n  AI review estimate: {n_conditions_review} conditions → ~{est_calls} API calls")
+                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_hits_review} hits → ~{est_calls} API calls")
             else:
-                print(f"\n  AI review estimate: {n_conditions_review} conditions (batch size auto-calculated)")
+                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_hits_review} hits (batch size auto-calculated)")
 
         results["df_ranked"] = df_ranked
         return results
@@ -978,15 +980,27 @@ class Condition2ConceptID:
         n_conditions = len(conditions_to_review)
 
         # Auto-calculate batch size if not provided
-        if batch_size is None:
+        user_batch_size = batch_size is not None
+        if not user_batch_size:
             avg_matches = len(df_to_review) / max(1, n_conditions)
             batch_size = self._calculate_batch_size(avg_matches)
 
         est_calls = math.ceil(n_conditions / batch_size)
 
-        print(f"  Reviewing: {', '.join(to_be_reviewed)}")
+        # Per-status hit counts
+        if "validation_status" in df_to_review.columns:
+            status_counts = dict(
+                df_to_review.group_by("validation_status").len().iter_rows()
+            )
+            status_parts = [
+                f"{s}: {status_counts[s]}" for s in to_be_reviewed if s in status_counts
+            ]
+            print(f"  Reviewing: {', '.join(status_parts)}")
+        else:
+            print(f"  Reviewing: {len(df_to_review)} fuzzy matches")
+
         print(f"  Conditions for AI review: {n_conditions}")
-        print(f"  Batch size: {batch_size} ({'user-specified' if batch_size else 'auto-calculated'})")
+        print(f"  Batch size: {batch_size} ({'user-specified' if user_batch_size else 'auto-calculated'})")
         print(f"  Estimated API calls: {est_calls}")
         print(f"  Model: {model}")
 
@@ -1106,9 +1120,11 @@ class Condition2ConceptID:
                 pl.lit(None).cast(pl.Int64).alias("ai_confidence"),
             )
 
-        # Count final verdicts (after confidence thresholding)
-        # Use df_ranked (post-join) so we can count by condition
-        df_reviewed = df_ranked.filter(pl.col("ai_verdict").is_not_null())
+        # Count final verdicts (only rows that were sent for review)
+        df_reviewed = df_ranked.filter(
+            pl.col("ai_verdict").is_not_null()
+            & pl.col("validation_status").is_in(to_be_reviewed)
+        )
 
         n_accepted_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "accept"))
         n_rejected_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "reject"))
