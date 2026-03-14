@@ -787,7 +787,7 @@ class Condition2ConceptID:
                     continue
 
                 if not ref_ids:
-                    status = "unvalidated"
+                    status = "no_reference"
                     if domain_anchors and len(df_ancestors) > 0:
                         match_ancestors = set(
                             df_ancestors.filter(pl.col("snomed_concept_id") == match_snomed)
@@ -808,7 +808,7 @@ class Condition2ConceptID:
                         "condition_name": cond, "search_term": search_term,
                         "snomed_concept_id": match_snomed,
                         "ancestor_distance": None, "nearest_ancestor_name": None,
-                        "validation_status": "review",
+                        "validation_status": "weak_match",
                     })
                     continue
 
@@ -835,13 +835,13 @@ class Condition2ConceptID:
                             best_ancestor = m_rows["ancestor_name"][0]
 
                 if best_dist is None:
-                    status = "review"
+                    status = "weak_match"
                 elif best_dist <= 4:
                     status = "confirmed"
                 elif best_dist <= 8:
                     status = "plausible"
                 else:
-                    status = "review"
+                    status = "weak_match"
 
                 validation_rows.append({
                     "condition_name": cond, "search_term": search_term,
@@ -862,7 +862,7 @@ class Condition2ConceptID:
             df_ranked = df_ranked.with_columns(
                 pl.lit(None).cast(pl.Int64).alias("ancestor_distance"),
                 pl.lit(None).cast(pl.Utf8).alias("nearest_ancestor_name"),
-                pl.lit("unvalidated").alias("validation_status"),
+                pl.lit("no_reference").alias("validation_status"),
             )
 
         if len(df_finding_site) > 0:
@@ -884,7 +884,7 @@ class Condition2ConceptID:
 
             n_conditions_review = len(set(
                 r["condition_name"] for r in validation_rows
-                if r["validation_status"] in ("review", "plausible", "unvalidated")
+                if r["validation_status"] in ("weak_match", "plausible", "no_reference")
             ))
             if ai_review_batch_size is not None:
                 est_calls = math.ceil(n_conditions_review / ai_review_batch_size)
@@ -932,7 +932,7 @@ class Condition2ConceptID:
         results : dict
             Output from enrich() (or map()).
         review_filter : list[str], optional
-            Validation statuses to review. Default: ["review", "plausible", "unvalidated"].
+            Validation statuses to review. Default: ["weak_match", "plausible", "no_reference"].
         batch_size : int, optional
             Conditions per API call. If None, auto-calculated from model limits.
         confidence_threshold : int
@@ -948,7 +948,7 @@ class Condition2ConceptID:
         df_ranked = results["df_ranked"].clone()
 
         if review_filter is None:
-            review_filter = ["review", "plausible", "unvalidated"]
+            review_filter = ["weak_match", "plausible", "no_reference"]
 
         if "validation_status" in df_ranked.columns:
             df_to_review = df_ranked.filter(
