@@ -26,3 +26,8 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+]

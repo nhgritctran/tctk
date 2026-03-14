@@ -572,17 +572,58 @@ class Condition2ConceptID:
 
         still_unmatched = df_input.filter(~pl.col("search_term").is_in(all_matched_terms))
 
+        n_conditions = len(all_conditions)
+        n_search_terms = df_input["search_term"].n_unique()
+        n_exact_terms = df_exact["search_term"].n_unique()
+        n_fuzzy_terms = df_fuzzy["search_term"].n_unique() if len(df_fuzzy) > 0 else 0
+        n_matched_terms = n_exact_terms + n_fuzzy_terms
+        n_unmatched_terms = len(still_unmatched)
+        n_cond_matched = len(conditions_with_any_match)
+        n_cond_no_match = len(conditions_no_match)
+
+        # Expansion breakdown
+        df_has_snomed = df_ranked.filter(pl.col("snomed_concept_id").is_not_null())
+        n_snomed = df_has_snomed["snomed_concept_id"].n_unique()
+        n_total_matches = len(df_has_snomed)
+
+        # Step 1: terms → concept hits (fuzzy returns up to 5 per term)
+        n_exact_hits = len(df_exact)
+        n_fuzzy_hits = len(df_fuzzy) if len(df_fuzzy) > 0 else 0
+        n_concept_hits = n_exact_hits + n_fuzzy_hits
+
+        # Step 2: non-SNOMED concepts → SNOMED mapping expansion
+        n_snomed_self = len(df_has_snomed.filter(
+            pl.col("vocabulary_id") == "SNOMED"
+        ))
+        n_snomed_mapped = n_total_matches - n_snomed_self
+        n_non_snomed_source = (
+            df_ranked.filter(pl.col("vocabulary_id") != "SNOMED")
+            .select("concept_id").unique().height
+        )
+
         print(f"\n{'=' * 40}")
         print(f"  MAPPING SUMMARY")
         print(f"{'=' * 40}")
-        print(f"  Total conditions:             {len(all_conditions)}")
-        print(f"  Conditions with >=1 match:    {len(conditions_with_any_match)}")
-        print(f"  Conditions with 0 matches:    {len(conditions_no_match)}")
-        print(f"  Unique SNOMED concept IDs:    {df_ranked['snomed_concept_id'].drop_nulls().n_unique()}")
-        print(f"  Total search terms:           {df_input['search_term'].n_unique()}")
-        print(f"  Terms matched (exact):        {df_exact['search_term'].n_unique()}")
-        print(f"  Terms matched (fuzzy):        {df_fuzzy['search_term'].n_unique() if len(df_fuzzy) > 0 else 0}")
-        print(f"  Terms still unmatched:        {len(still_unmatched)}")
+        print(f"  Input: {n_conditions} conditions → {n_search_terms} search terms")
+        print(f"  Matched: {n_exact_terms} exact + {n_fuzzy_terms} fuzzy "
+              f"= {n_matched_terms} terms ({n_unmatched_terms} unmatched)")
+        print(f"  Conditions with >=1 match: {n_cond_matched}")
+        print(f"  Conditions with 0 matches: {n_cond_no_match}")
+        print(f"")
+        print(f"  Concept hits (each term can match multiple concepts):")
+        print(f"    Exact: {n_exact_terms} terms → {n_exact_hits} hits")
+        print(f"    Fuzzy: {n_fuzzy_terms} terms → {n_fuzzy_hits} hits")
+        print(f"    Total: {n_matched_terms} terms → {n_concept_hits} hits")
+        print(f"")
+        print(f"  SNOMED mapping:")
+        print(f"    Already SNOMED: {n_snomed_self}")
+        print(f"    Non-SNOMED: {n_non_snomed_source} concepts → "
+              f"{n_snomed_mapped} SNOMED mappings")
+        print(f"    Total: {n_total_matches} matches "
+              f"({n_snomed} unique SNOMED concepts)")
+        print(f"")
+        print(f"  Next: enrich() will validate {n_total_matches} matches "
+              f"from {n_cond_matched} conditions")
         print(f"{'=' * 40}")
 
         return {
@@ -713,7 +754,14 @@ class Condition2ConceptID:
             )
 
         # --- C. Per-condition validation ---
-        print("  Computing per-condition validation...")
+        df_with_snomed = df_ranked.filter(pl.col("snomed_concept_id").is_not_null())
+        n_exact_rows = len(df_with_snomed.filter(pl.col("match_type") == "exact"))
+        n_fuzzy_rows = len(df_with_snomed.filter(pl.col("match_type") == "fuzzy"))
+        n_cond_matched = df_with_snomed["condition_name"].n_unique()
+
+        print(f"\n  Validating {len(df_with_snomed)} matches "
+              f"({n_exact_rows} exact + {n_fuzzy_rows} fuzzy) "
+              f"from {n_cond_matched} conditions...")
 
         df_refs = (
             df_ranked.filter(
@@ -723,6 +771,14 @@ class Condition2ConceptID:
             .select("condition_name", "snomed_concept_id")
             .unique()
         )
+
+        n_cond_with_refs = df_refs["condition_name"].n_unique() if len(df_refs) > 0 else 0
+        n_cond_no_refs = n_cond_matched - n_cond_with_refs
+        print(f"    Reference anchors (exact or fuzzy>=90): "
+              f"{len(df_refs)} across {n_cond_with_refs} conditions")
+        if n_cond_no_refs > 0:
+            print(f"    Conditions without references: {n_cond_no_refs} "
+                  f"(all their matches → 'no_reference')")
 
         # Domain anchor discovery (single_domain mode)
         domain_anchors = set()
@@ -890,12 +946,15 @@ class Condition2ConceptID:
 
         # Summary (count from final df_ranked — matches what AI review will receive)
         df_with_status = df_ranked.filter(pl.col("validation_status").is_not_null())
-        if len(df_with_status) > 0:
+        n_validated = len(df_with_status)
+        if n_validated > 0:
             status_order = ["confirmed", "plausible", "weak_match", "no_reference"]
             status_counts = dict(
                 df_with_status.group_by("validation_status").len().iter_rows()
             )
-            print(f"\n  Validation status distribution:")
+            n_confirmed = status_counts.get("confirmed", 0)
+
+            print(f"\n  Validation results ({n_validated} matches):")
             for status in status_order:
                 if status in status_counts:
                     print(f"    {status}: {status_counts[status]}")
@@ -905,11 +964,15 @@ class Condition2ConceptID:
             )
             n_matches_review = len(df_for_review)
             n_conditions_review = df_for_review["condition_name"].n_unique()
+
+            print(f"\n  Next: ai_review() will evaluate {n_matches_review} matches "
+                  f"from {n_conditions_review} conditions "
+                  f"({n_confirmed} confirmed matches excluded)")
             if ai_review_batch_size is not None:
                 est_calls = math.ceil(n_conditions_review / ai_review_batch_size)
-                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_matches_review} matches → ~{est_calls} API calls")
+                print(f"  Estimated API calls: ~{est_calls} (batch size: {ai_review_batch_size})")
             else:
-                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_matches_review} matches (batch size auto-calculated)")
+                print(f"  Batch size: auto-calculated at ai_review() time")
 
         results["df_ranked"] = df_ranked
         return results
