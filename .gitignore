@@ -170,8 +170,8 @@ src/tctk/omop/*
 /.idea/tctk.iml
 /.idea/vcs.xml
 
-# Dev notebooks
-notebooks/
+# Dev devnotebooks
+devnotebooks/
 
 # Local env
 .env
