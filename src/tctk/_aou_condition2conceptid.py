@@ -885,19 +885,18 @@ class Condition2ConceptID:
             print(f"\n  Validation status distribution:")
             for status in status_order:
                 if status in status_counts:
-                    print(f"    {status}: {status_counts[status]}")
+                    print(f"    {status} ({status_counts[status]})")
 
-            review_rows = [
-                r for r in validation_rows
-                if r["validation_status"] in ("weak_match", "plausible", "no_reference")
-            ]
-            n_hits_review = len(review_rows)
-            n_conditions_review = len(set(r["condition_name"] for r in review_rows))
+            df_for_review = df_val.filter(
+                pl.col("validation_status").is_in(["weak_match", "plausible", "no_reference"])
+            )
+            n_matches_review = len(df_for_review)
+            n_conditions_review = df_for_review["condition_name"].n_unique()
             if ai_review_batch_size is not None:
                 est_calls = math.ceil(n_conditions_review / ai_review_batch_size)
-                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_hits_review} hits → ~{est_calls} API calls")
+                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_matches_review} matches → ~{est_calls} API calls")
             else:
-                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_hits_review} hits (batch size auto-calculated)")
+                print(f"\n  AI review estimate: {n_conditions_review} conditions, {n_matches_review} matches (batch size auto-calculated)")
 
         results["df_ranked"] = df_ranked
         return results
@@ -987,7 +986,7 @@ class Condition2ConceptID:
 
         est_calls = math.ceil(n_conditions / batch_size)
 
-        # Per-status hit counts
+        # Per-status counts
         if "validation_status" in df_to_review.columns:
             status_counts = dict(
                 df_to_review.group_by("validation_status").len().iter_rows()
@@ -1126,10 +1125,10 @@ class Condition2ConceptID:
             & pl.col("validation_status").is_in(to_be_reviewed)
         )
 
-        n_accepted_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "accept"))
-        n_rejected_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "reject"))
-        n_human_review_hits = len(df_reviewed.filter(pl.col("ai_verdict") == "human review"))
-        n_total = n_accepted_hits + n_rejected_hits + n_human_review_hits
+        n_accepted = len(df_reviewed.filter(pl.col("ai_verdict") == "accept"))
+        n_rejected = len(df_reviewed.filter(pl.col("ai_verdict") == "reject"))
+        n_human_review = len(df_reviewed.filter(pl.col("ai_verdict") == "human review"))
+        n_total = n_accepted + n_rejected + n_human_review
 
         n_cond_accepted = df_reviewed.filter(
             pl.col("ai_verdict") == "accept"
@@ -1151,10 +1150,10 @@ class Condition2ConceptID:
         print(f"  Model used:        {model}")
         print(f"  API calls used:    {calls_used}")
         print(f"  Confidence cutoff: {confidence_threshold}")
-        print(f"  Total hits reviewed: {n_total}")
-        print(f"    accepted:        {n_accepted_hits} hits ({n_cond_accepted} conditions with at least 1 hit)")
-        print(f"    rejected:        {n_rejected_hits} hits ({n_cond_rejected} conditions lost all hits)")
-        print(f"    human review:    {n_human_review_hits} hits ({n_cond_human_review} conditions)")
+        print(f"  Total reviewed:    {n_total} matches")
+        print(f"    accepted:        {n_accepted} matches ({n_cond_accepted} conditions with at least 1 accepted)")
+        print(f"    rejected:        {n_rejected} matches ({n_cond_rejected} conditions lost all hits)")
+        print(f"    human review:    {n_human_review} matches ({n_cond_human_review} conditions)")
         print(f"{'=' * 40}")
 
         results["df_ranked"] = df_ranked
