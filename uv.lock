@@ -2974,6 +2974,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "jupyter" },
+    { name = "tctk" },
 ]
 
 [package.metadata]
@@ -2991,7 +2992,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "jupyter", specifier = ">=1.1.1" }]
+dev = [
+    { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "tctk", editable = "." },
+]
 
 [[package]]
 name = "terminado"

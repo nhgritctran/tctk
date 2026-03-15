@@ -84,6 +84,19 @@ class Condition2ConceptID:
 
     BATCH_SIZE = 500
 
+    # Generic medical nouns excluded from fuzzy scoring to prevent
+    # false matches driven by shared non-discriminative tokens.
+    _FUZZY_STOPWORDS = {
+        "disease", "disorder", "syndrome", "condition", "infection",
+        "of", "the", "and", "in", "with", "by", "to", "a", "an",
+    }
+
+    @staticmethod
+    def _strip_stopwords(text: str, stopwords: set[str]) -> str:
+        """Remove stopwords from text for fuzzy scoring."""
+        tokens = [t for t in text.split() if t not in stopwords]
+        return " ".join(tokens) if tokens else text
+
     def __init__(
         self,
         vocab_db: Optional[str] = None,
@@ -178,6 +191,8 @@ class Condition2ConceptID:
         - Tags like (subtype) and (synonym) are stripped.
         - Terms containing parentheses are expanded into two variants:
           one with and one without the parenthetical.
+        - Terms containing "/" are split into separate search terms
+          (e.g. "myositis/polymyositis" → "myositis", "polymyositis").
         """
         rows = []
         for condition_name, condition_synonyms in conditions.items():
@@ -220,9 +235,29 @@ class Condition2ConceptID:
             ).filter(pl.col("search_term") != "")
         )
 
+        df_combined = pl.concat(
+            [df_no_parens, df_has_parens, df_parens_stripped],
+            how="diagonal_relaxed",
+        )
+
+        # Expand terms containing "/" into separate search terms
+        # e.g. "myositis/polymyositis" → "myositis", "polymyositis"
+        df_has_slash = df_combined.filter(pl.col("search_term").str.contains("/"))
+        slash_rows = []
+        for row in df_has_slash.iter_rows(named=True):
+            for part in row["search_term"].split("/"):
+                part = part.strip()
+                if part:
+                    slash_rows.append({
+                        "condition_name": row["condition_name"],
+                        "search_term_raw": row.get("search_term_raw", ""),
+                        "search_term": part,
+                    })
+        df_slash_expanded = pl.DataFrame(slash_rows) if slash_rows else pl.DataFrame(schema=df_combined.schema)
+
         df_input = (
             pl.concat(
-                [df_no_parens, df_has_parens, df_parens_stripped],
+                [df_combined, df_slash_expanded],
                 how="diagonal_relaxed",
             )
             .unique(subset=["condition_name", "search_term"])
@@ -260,6 +295,9 @@ class Condition2ConceptID:
             FROM (SELECT UNNEST([{terms_sql}]) AS term) i
             JOIN concept_synonym cs
                 ON LOWER(TRIM(cs.concept_synonym_name)) = i.term
+                OR LOWER(TRIM(REGEXP_REPLACE(
+                    cs.concept_synonym_name, '\s*\([^)]*\)', '', 'g'
+                ))) = i.term
             JOIN concept c
                 ON cs.concept_id = c.concept_id
             WHERE c.domain_id = 'Condition'
@@ -272,6 +310,10 @@ class Condition2ConceptID:
         df_exact_bq = (
             pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
         )
+
+        # Deduplicate: a synonym matching both with and without () produces one row
+        if len(df_exact_bq) > 0:
+            df_exact_bq = df_exact_bq.unique(subset=["search_term", "concept_id"])
 
         df_exact = (
             df_input.select("condition_name", "search_term")
@@ -340,6 +382,11 @@ class Condition2ConceptID:
             return pl.DataFrame(schema=df_exact.schema)
 
         candidate_synonyms = df_candidates["concept_synonym_lower"].to_list()
+        # Pre-compute stopword-stripped versions for scoring
+        candidate_stripped = [
+            self._strip_stopwords(s, self._FUZZY_STOPWORDS)
+            for s in candidate_synonyms
+        ]
         fuzzy_results = []
 
         for row in tqdm(
@@ -348,14 +395,16 @@ class Condition2ConceptID:
             desc="Fuzzy matching terms",
         ):
             term = row["search_term"]
+            term_stripped = self._strip_stopwords(term, self._FUZZY_STOPWORDS)
             matches = process.extract(
-                term,
-                candidate_synonyms,
+                term_stripped,
+                candidate_stripped,
                 scorer=fuzz.token_sort_ratio,
                 limit=5,
                 score_cutoff=self.fuzzy_threshold,
             )
-            for matched_text, score, idx in matches:
+            for _, score, idx in matches:
+                matched_text = candidate_synonyms[idx]  # original text
                 cand = df_candidates.row(idx, named=True)
                 fuzzy_results.append(
                     {
@@ -376,7 +425,7 @@ class Condition2ConceptID:
         if fuzzy_results:
             df_fuzzy = pl.DataFrame(fuzzy_results)
             print(
-                f"  Fuzzy matches: {len(df_fuzzy)} rows "
+                f"  Fuzzy matches: {len(df_fuzzy)} fuzzy synonyms "
                 f"for {df_fuzzy['search_term'].n_unique()} terms"
             )
             return df_fuzzy
@@ -555,6 +604,7 @@ class Condition2ConceptID:
                     pl.col("concept_id").unique().sort().str.join(", ").alias("source_concept_ids"),
                     pl.col("vocabulary_id").unique().sort().str.join(", ").alias("source_vocabularies"),
                     pl.col("search_term").unique().sort().str.join(", ").alias("matched_via"),
+                    pl.col("matched_concept_synonym").unique().sort().str.join(", ").alias("matched_synonyms"),
                     pl.col("match_type").first().alias("primary_match_type"),
                     pl.col("match_score").min().alias("lowest_score"),
                 ]
@@ -957,7 +1007,8 @@ class Condition2ConceptID:
             print(f"\n  Validation results ({n_validated} matches):")
             for status in status_order:
                 if status in status_counts:
-                    print(f"    {status}: {status_counts[status]}")
+                    label = status.replace("_", " ")
+                    print(f"    {label}: {status_counts[status]}")
 
             df_for_review = df_with_status.filter(
                 pl.col("validation_status").is_in(["weak_match", "plausible", "no_reference"])
@@ -1110,12 +1161,72 @@ class Condition2ConceptID:
         all_verdicts = []
         calls_used = 0
 
+        # Verify fuzzy scores match stored values
+        df_fuzzy_rows = df_to_review.filter(pl.col("match_type") == "fuzzy")
+        if len(df_fuzzy_rows) > 0:
+            mismatches = []
+            for row in df_fuzzy_rows.iter_rows(named=True):
+                synonym = row.get("matched_concept_synonym", "")
+                if not synonym:
+                    continue
+                term_stripped = self._strip_stopwords(row["search_term"], self._FUZZY_STOPWORDS)
+                syn_stripped = self._strip_stopwords(synonym, self._FUZZY_STOPWORDS)
+                recomputed = int(fuzz.token_sort_ratio(term_stripped, syn_stripped))
+                if recomputed != row["match_score"]:
+                    mismatches.append(
+                        f"    '{row['search_term']}' ↔ '{synonym}': "
+                        f"stored={row['match_score']}, recomputed={recomputed}"
+                    )
+            if mismatches:
+                print(f"  WARNING: {len(mismatches)} fuzzy score mismatches:")
+                for m in mismatches[:10]:
+                    print(m)
+            else:
+                print(f"  Fuzzy score check: all {len(df_fuzzy_rows)} scores verified")
+
+        # Build and print 1 example prompt (first condition only)
+        _ex_parts = [
+            "You are a clinical terminologist with expertise in OMOP and SNOMED CT vocabularies.\n"
+            "You are validating fuzzy matches between search terms and SNOMED concepts.\n"
+            "Each entry shows: term (search term), fuzzy_synonym (the vocabulary "
+            "synonym text that fuzzy-matched), and snomed (the SNOMED concept it maps to).\n"
+            "Accept if the SNOMED concept captures the same clinical meaning "
+            "as the search term in the context of the condition.\n"
+            "Reject if it refers to a different condition, wrong body site, "
+            "wrong specificity, or unrelated finding.\n"
+            "Rate confidence 0-100 (100 = certain).\n"
+            "Reason must be 10 words or fewer.\n"
+        ]
+        _ex_cond = conditions_to_review[0]
+        _ex_rows = df_to_review.filter(pl.col("condition_name") == _ex_cond)
+        _ex_parts.append(f"Condition: {_ex_cond}")
+        for row in _ex_rows.iter_rows(named=True):
+            parts = [
+                f"term={row.get('search_term', '')}",
+                f"fuzzy_synonym={row.get('matched_concept_synonym', '')}",
+                f"snomed={row.get('snomed_concept_name', '')}",
+                f"id={row['snomed_concept_id']}",
+                f"fuzzy={row['match_score']}",
+            ]
+            if row.get("ancestor_distance") is not None:
+                parts.append(f"ancestor_dist={row['ancestor_distance']}")
+            if row.get("finding_site"):
+                parts.append(f"site={row['finding_site']}")
+            if row.get("associated_morphology"):
+                parts.append(f"morphology={row['associated_morphology']}")
+            _ex_parts.append(" | ".join(parts))
+
+        print(f"\n  Example prompt (condition 1 of {n_conditions}):")
+        for line in "\n".join(_ex_parts).splitlines():
+            print(f"    {line}")
+
         for batch in tqdm(cond_batches, desc="AI review batches"):
             prompt_parts = [
+                "You are a clinical terminologist with expertise in OMOP and SNOMED CT vocabularies.\n"
                 "You are validating fuzzy matches between search terms and SNOMED concepts.\n"
-                "Each entry shows: term (search term derived from the condition) and "
-                "matched (SNOMED concept name found by fuzzy matching).\n"
-                "Accept if the matched SNOMED concept captures the same clinical meaning "
+                "Each entry shows: term (search term), fuzzy_synonym (the vocabulary "
+                "synonym text that fuzzy-matched), and snomed (the SNOMED concept it maps to).\n"
+                "Accept if the SNOMED concept captures the same clinical meaning "
                 "as the search term in the context of the condition.\n"
                 "Reject if it refers to a different condition, wrong body site, "
                 "wrong specificity, or unrelated finding.\n"
@@ -1131,7 +1242,8 @@ class Condition2ConceptID:
                     search_term = row.get("search_term", "")
                     parts_line = [
                         f"term={search_term}",
-                        f"matched={row.get('snomed_concept_name', '')}",
+                        f"fuzzy_synonym={row.get('matched_concept_synonym', '')}",
+                        f"snomed={row.get('snomed_concept_name', '')}",
                         f"id={row['snomed_concept_id']}",
                         f"fuzzy={row['match_score']}",
                     ]

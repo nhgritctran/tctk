@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tctk"
-version = "0.2.25"
+version = "0.3.1"
 description = "A collection of mini tools."
 license = { text = "GPL-3.0" }
 authors = [
@@ -27,7 +27,16 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.uv.workspace]
+members = [
+    ".",
+]
+
+[tool.uv.sources]
+tctk = { workspace = true, editable = true }
+
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "tctk",
 ]
