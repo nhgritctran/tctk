@@ -28,7 +28,10 @@ CONFIG_PATHS = [
 _TIER_PRIORITY = {"pro": 3, "flash": 2, "flash-lite": 1}
 
 # Model name substrings to exclude (not suitable for text-only tasks)
-_MODEL_EXCLUSIONS = ["image", "vision", "preview", "embedding", "aqa", "bison"]
+# Note: "preview" intentionally NOT excluded — newer models (e.g. gemini-3.1-pro)
+# may only be available as preview initially. "image" and "vision" already catch
+# non-text models like gemini-3.1-flash-image-preview.
+_MODEL_EXCLUSIONS = ["image", "vision", "embedding", "aqa", "bison"]
 
 
 # -------------------------------------------------------------------
@@ -152,7 +155,7 @@ def check_api_key(api_key: Optional[str]) -> str:
             "Option 2: Set environment variable\n"
             "  os.environ['GEMINI_API_KEY'] = 'your-key'\n\n"
             "Option 3: Pass directly\n"
-            "  Condition2ConceptID(gemini_api_key='your-key')\n\n"
+            "  Condition2SNOMED(gemini_api_key='your-key')\n\n"
             "Get a free key at: https://aistudio.google.com/apikey"
         )
     return api_key
@@ -259,6 +262,7 @@ def _parse_model_version(model_name: str) -> float:
 def detect_best_model(
     api_key: str,
     ai_tier: Optional[str] = None,
+    min_version: float = 3.0,
 ) -> str:
     """Query Gemini API and select the best available text model.
 
@@ -270,11 +274,14 @@ def detect_best_model(
         Preferred tier: "pro", "flash", or "flash-lite".
         Default None → picks "flash" tier (cost-effective default),
         then best version within that tier.
+    min_version : float
+        Minimum model version. Default 3.0 (prefer Gemini 3.x+).
+        Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
 
     Returns
     -------
     str
-        Full model name (e.g., "gemini-2.5-flash").
+        Full model name (e.g., "gemini-3.0-flash").
 
     Raises
     ------
@@ -322,18 +329,44 @@ def detect_best_model(
             "Ensure the Generative Language API is enabled."
         )
 
-    # Filter by preferred tier
+    # Selection priority:
+    #   1. Preferred tier + min_version  (e.g. pro >= 3.0)
+    #   2. Any tier    + min_version     (e.g. flash >= 3.0)
+    #   3. Preferred tier + any version  (e.g. pro 2.5)
+    #   4. All candidates                (fallback)
     ai_tier = ai_tier.lower().strip()
-    tier_candidates = [c for c in candidates if c["tier"] == ai_tier]
-    if tier_candidates:
-        candidates = tier_candidates
+
+    tier_version = [
+        c for c in candidates
+        if c["tier"] == ai_tier and c["version"] >= min_version
+    ]
+    if tier_version:
+        candidates = tier_version
     else:
-        available_tiers = sorted(set(c["tier"] for c in candidates))
-        print(
-            f"  Warning: tier '{ai_tier}' not available. "
-            f"Available: {', '.join(available_tiers)}. "
-            f"Falling back to best available."
-        )
+        any_version = [c for c in candidates if c["version"] >= min_version]
+        if any_version:
+            tiers_at_version = sorted(set(c["tier"] for c in any_version))
+            print(
+                f"  Warning: no '{ai_tier}' models >= {min_version}. "
+                f"Using best available tier at >= {min_version} "
+                f"({', '.join(tiers_at_version)})."
+            )
+            candidates = any_version
+        else:
+            tier_any = [c for c in candidates if c["tier"] == ai_tier]
+            if tier_any:
+                best_v = max(c["version"] for c in tier_any)
+                print(
+                    f"  Warning: no models >= {min_version}. "
+                    f"Best '{ai_tier}': {best_v}."
+                )
+                candidates = tier_any
+            else:
+                available_tiers = sorted(set(c["tier"] for c in candidates))
+                print(
+                    f"  Warning: tier '{ai_tier}' not available. "
+                    f"Available: {', '.join(available_tiers)}."
+                )
 
     # Sort: best tier first, then highest version
     candidates.sort(key=lambda c: (c["tier_priority"], c["version"]), reverse=True)
