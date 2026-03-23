@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tctk"
-version = "0.3.2"
+version = "0.3.3"
 description = "A collection of mini tools."
 license = { text = "GPL-3.0" }
 authors = [
@@ -16,9 +16,12 @@ dependencies = [
     "duckdb",
     "google-cloud-bigquery",
     "huggingface_hub",
+    "matplotlib>=3.5",
     "polars",
     "pyarrow",
     "rapidfuzz",
+    "striprtf",
+    "beautifulsoup4",
     "requests",
     "tableone",
     "tqdm",

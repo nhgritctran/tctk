@@ -5,7 +5,7 @@ import polars as pl
 import subprocess
 import time
 
-from tctk._aou_dsub import Dsub
+from tctk.aou.dsub import Dsub
 
 
 class GWAS:

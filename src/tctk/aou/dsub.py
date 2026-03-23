@@ -26,8 +26,8 @@ class Dsub:
         disk_size=256,
         user_project=os.getenv("GOOGLE_PROJECT"),
         project=os.getenv("GOOGLE_PROJECT"),
-        dsub_user_name=os.getenv("OWNER_EMAIL").split("@")[0],
-        user_name=os.getenv("OWNER_EMAIL").split("@")[0].replace(".", "-"),
+        dsub_user_name=None,
+        user_name=None,
         bucket=os.getenv("WORKSPACE_BUCKET"),
         google_project=os.getenv("GOOGLE_PROJECT"),
         region="us-central1",
@@ -37,6 +37,14 @@ class Dsub:
         custom_args=None,
         use_aou_docker_prefix: bool = True,
     ):
+        # Resolve defaults that depend on environment variables
+        if dsub_user_name is None:
+            _email = os.getenv("OWNER_EMAIL", "")
+            dsub_user_name = _email.split("@")[0] if _email else ""
+        if user_name is None:
+            _email = os.getenv("OWNER_EMAIL", "")
+            user_name = _email.split("@")[0].replace(".", "-") if _email else ""
+
         # Standard attributes
         self.docker_image = docker_image
         self.job_script_name = job_script_name

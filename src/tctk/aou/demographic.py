@@ -3,7 +3,7 @@ from tableone import TableOne
 import os
 import pandas as pd
 import polars as pl
-import tctk.polars_tools as pt
+import tctk.utils.polars as pt
 
 
 class Demographic:

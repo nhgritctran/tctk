@@ -34,7 +34,7 @@ from tctk._utils import (
     sql_escape,
     write_tsv_bom,
 )
-from tctk._omop_utils import ConditionMapperBase
+from tctk.omop._base import ConditionMapperBase
 
 __all__ = ["Condition2SNOMED"]
 
@@ -69,10 +69,14 @@ class Condition2SNOMED(ConditionMapperBase):
         df_fuzzy: pl.DataFrame,
         df_matches: pl.DataFrame,
     ) -> pl.DataFrame:
-        """Print matching stats and return per-condition term counts."""
+        """Print matching stats and return per-condition term counts.
+
+        All counts are (condition, search_term) pairs, not unique terms.
+        """
+        # Per-condition pair counts
         df_term_counts = (
             df_input.group_by("condition_name").agg(
-                pl.col("search_term").n_unique().alias("total_terms")
+                pl.len().alias("total_terms")
             )
         )
 
@@ -81,7 +85,7 @@ class Condition2SNOMED(ConditionMapperBase):
         df_matched_counts = (
             df_input.filter(pl.col("search_term").is_in(all_matched_terms))
             .group_by("condition_name")
-            .agg(pl.col("search_term").n_unique().alias("matched_terms"))
+            .agg(pl.len().alias("matched_terms"))
         )
 
         df_term_counts = (
@@ -98,12 +102,24 @@ class Condition2SNOMED(ConditionMapperBase):
 
         still_unmatched = df_input.filter(~pl.col("search_term").is_in(all_matched_terms))
 
+        # Count by (condition, search_term) pairs throughout
         n_conditions = len(all_conditions)
-        n_search_terms = df_input["search_term"].n_unique()
-        n_exact_terms = df_exact["search_term"].n_unique()
-        n_fuzzy_terms = df_fuzzy["search_term"].n_unique() if len(df_fuzzy) > 0 else 0
-        n_matched_terms = n_exact_terms + n_fuzzy_terms
-        n_unmatched_terms = len(still_unmatched)
+        n_search_terms = len(df_input)
+        exact_term_set = set(df_exact["search_term"].unique().to_list())
+        fuzzy_term_set = (
+            set(df_fuzzy["search_term"].unique().to_list())
+            if len(df_fuzzy) > 0 else set()
+        )
+        fuzzy_only_set = fuzzy_term_set - exact_term_set
+        # Count input pairs whose term landed in each bucket
+        n_exact_pairs = len(df_input.filter(
+            pl.col("search_term").is_in(list(exact_term_set))
+        ))
+        n_fuzzy_pairs = len(df_input.filter(
+            pl.col("search_term").is_in(list(fuzzy_only_set))
+        ))
+        n_matched_pairs = n_exact_pairs + n_fuzzy_pairs
+        n_unmatched_pairs = len(still_unmatched)
         n_cond_matched = len(conditions_with_any_match)
         n_cond_no_match = len(conditions_no_match)
 
@@ -118,15 +134,15 @@ class Condition2SNOMED(ConditionMapperBase):
         print(f"  MAPPING SUMMARY")
         print(f"{'=' * 40}")
         print(f"  Input: {n_conditions} conditions -> {n_search_terms} search terms")
-        print(f"  Matched: {n_exact_terms} exact + {n_fuzzy_terms} fuzzy "
-              f"= {n_matched_terms} terms ({n_unmatched_terms} unmatched)")
+        print(f"  Matched: {n_exact_pairs} exact + {n_fuzzy_pairs} fuzzy "
+              f"= {n_matched_pairs} terms ({n_unmatched_pairs} unmatched)")
         print(f"  Conditions with >=1 match: {n_cond_matched}")
         print(f"  Conditions with 0 matches: {n_cond_no_match}")
         print(f"")
-        print(f"  Concept hits (each term can match multiple concepts):")
-        print(f"    Exact: {n_exact_terms} terms -> {n_exact_hits} hits")
-        print(f"    Fuzzy: {n_fuzzy_terms} terms -> {n_fuzzy_hits} hits")
-        print(f"    Total: {n_matched_terms} terms -> {n_concept_hits} hits")
+        print(f"  Concept matches (each term can match multiple concepts):")
+        print(f"    Exact: {n_exact_pairs} terms -> {n_exact_hits} matches")
+        print(f"    Fuzzy: {n_fuzzy_pairs} terms -> {n_fuzzy_hits} matches")
+        print(f"    Total: {n_matched_pairs} terms -> {n_concept_hits} matches")
         print(f"")
         print(f"  SNOMED concepts: {n_snomed} unique "
               f"({n_total_matches} total matches)")
@@ -351,8 +367,8 @@ class Condition2SNOMED(ConditionMapperBase):
         ai_tier: str = "flash",
         ai_min_version: float = 3.0,
         config_path: Optional[str] = None,
-        confidence_threshold: int = 80,
         ai_batch_size: Optional[int] = None,
+        ai_passes: int = 2,
         export_tsv: bool = False,
         export_prefix: str = "mapping",
     ) -> dict:
@@ -378,11 +394,12 @@ class Condition2SNOMED(ConditionMapperBase):
             Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
         config_path : str, optional
             Path to JSON config file for API key.
-        confidence_threshold : int
-            Confidence score (0-100) below which AI verdicts are flagged as
-            "human review". Default 80.
         ai_batch_size : int, optional
             Conditions per AI review API call. If None, auto-calculated.
+        ai_passes : int
+            Number of initial AI review passes. Default 2.
+            Uses adaptive replication: 2 initial passes, then up to 5
+            for disagreements. Set to 1 for single-pass mode.
         export_tsv : bool
             If True, write five TSV files:
             ``{export_prefix}_full.tsv`` — all matched term pairs with
@@ -438,12 +455,12 @@ class Condition2SNOMED(ConditionMapperBase):
         df_input = self._build_input(conditions)
         print(
             f"  Conditions: {df_input['condition_name'].n_unique()}, "
-            f"Search terms: {df_input['search_term'].n_unique()}"
+            f"Search terms: {len(df_input)}"
         )
 
         step += 1
         print(f"\n\033[1m[{step}/{n_steps}] Matching against vocabulary...\033[0m")
-        df_exact, df_fuzzy = self._match(df_input, fuzzy_threshold=fuzzy_threshold)
+        df_exact, df_fuzzy = self._omop_lookup(df_input, fuzzy_threshold=fuzzy_threshold)
 
         # Combine exact + fuzzy into single DataFrame
         df_matches = pl.concat([df_exact, df_fuzzy], how="diagonal_relaxed")
@@ -481,11 +498,11 @@ class Condition2SNOMED(ConditionMapperBase):
             results = self.ai_review(
                 results,
                 batch_size=ai_batch_size,
-                confidence_threshold=confidence_threshold,
                 gemini_api_key=gemini_api_key,
                 ai_tier=ai_tier,
                 ai_min_version=ai_min_version,
                 config_path=config_path,
+                ai_passes=ai_passes,
             )
 
         # --- Build df_review: one row per match pair, flat columns ---
@@ -511,16 +528,23 @@ class Condition2SNOMED(ConditionMapperBase):
 
         # Add AI columns if present, otherwise nulls
         if "ai_verdict" in df_final.columns:
-            df_review = df_review.with_columns(
-                df_final["ai_verdict"],
-                df_final["ai_confidence"],
-                df_final["ai_comment"],
-            )
+            ai_col_names = [
+                "ai_verdict", "ai_vote", "ai_vote_confidence",
+                "ai_comment", "ai_comment_consistency",
+                "ai_comment_consistency_tier", "ai_combined_confidence",
+            ]
+            ai_cols = [df_final[c] for c in ai_col_names if c in df_final.columns]
+            if ai_cols:
+                df_review = df_review.with_columns(*ai_cols)
         else:
             df_review = df_review.with_columns(
                 pl.lit(None).cast(pl.Utf8).alias("ai_verdict"),
-                pl.lit(None).cast(pl.Int64).alias("ai_confidence"),
+                pl.lit(None).cast(pl.Utf8).alias("ai_vote"),
+                pl.lit(None).cast(pl.Utf8).alias("ai_vote_confidence"),
                 pl.lit(None).cast(pl.Utf8).alias("ai_comment"),
+                pl.lit(None).cast(pl.Int64).alias("ai_comment_consistency"),
+                pl.lit(None).cast(pl.Utf8).alias("ai_comment_consistency_tier"),
+                pl.lit(None).cast(pl.Utf8).alias("ai_combined_confidence"),
             )
 
         # Append "no match" rows for search terms that didn't match anything
@@ -605,10 +629,10 @@ class Condition2SNOMED(ConditionMapperBase):
             write_tsv_bom(df_unmatched_terms, f"{export_prefix}_unmatched_terms.tsv")
             write_tsv_bom(df_unmapped_conditions, f"{export_prefix}_unmapped_conditions.tsv")
             print(f"\nExported:")
-            print(f"  {export_prefix}_full.tsv                  ({len(df_review)} rows)")
-            print(f"  {export_prefix}_accepted.tsv              ({len(df_accepted)} rows)")
-            print(f"  {export_prefix}_rejected.tsv              ({len(df_rejected)} rows)")
-            print(f"  {export_prefix}_unmatched_terms.tsv       ({len(df_unmatched_terms)} rows)")
-            print(f"  {export_prefix}_unmapped_conditions.tsv   ({len(df_unmapped_conditions)} rows)")
+            print(f"  {export_prefix}_full.tsv                  ({len(df_review)} matches)")
+            print(f"  {export_prefix}_accepted.tsv              ({len(df_accepted)} matches)")
+            print(f"  {export_prefix}_rejected.tsv              ({len(df_rejected)} matches)")
+            print(f"  {export_prefix}_unmatched_terms.tsv       ({len(df_unmatched_terms)} terms)")
+            print(f"  {export_prefix}_unmapped_conditions.tsv   ({len(df_unmapped_conditions)} conditions)")
 
         return results

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,15 @@ _MODEL_EXCLUSIONS = ["image", "vision", "embedding", "aqa", "bison"]
 def sql_escape(s: str) -> str:
     """Escape single quotes for DuckDB SQL string literals."""
     return s.replace("'", "''")
+
+
+def strip_accents(text: str) -> str:
+    """Strip accent/diacritic marks from text, preserving base characters.
+
+    Example: "ménière" -> "meniere", "Sjögren" -> "Sjogren"
+    """
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
 # -------------------------------------------------------------------
@@ -498,3 +508,214 @@ def call_gemini(
     raise RuntimeError(
         f"Gemini API failed after {max_retries} retries"
     )
+
+
+# -------------------------------------------------------------------
+# Gemini context caching
+# -------------------------------------------------------------------
+
+_GEMINI_CACHE_MIN_TOKENS = 32_768  # Gemini minimum for cached content
+
+
+def create_gemini_cache(
+    system_prompt: str,
+    api_key: str,
+    model: str,
+    ttl: str = "3600s",
+) -> Optional[str]:
+    """Create a Gemini cached content entry for the system prompt.
+
+    Gemini requires at least 32,768 tokens for cached content.
+    Returns None immediately if the prompt is too short (rough
+    estimate: 4 chars per token).
+
+    Parameters
+    ----------
+    system_prompt : str
+        The system instruction text to cache.
+    api_key : str
+        Gemini API key.
+    model : str
+        Model name (e.g. "gemini-3.0-flash").
+    ttl : str
+        Time-to-live for the cache. Default "3600s" (1 hour).
+
+    Returns
+    -------
+    str or None
+        Cache name (e.g. "cachedContents/abc123") on success, None on failure.
+    """
+    # Rough token estimate: ~4 chars per token
+    est_tokens = len(system_prompt) // 4
+    if est_tokens < _GEMINI_CACHE_MIN_TOKENS:
+        return None
+
+    import requests
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/cachedContents?key={api_key}"
+
+    payload = {
+        "model": f"models/{model}",
+        "contents": [
+            {"parts": [{"text": system_prompt}], "role": "user"},
+        ],
+        "ttl": ttl,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        cache_name = data.get("name")
+        if cache_name:
+            return cache_name
+    except Exception:
+        pass
+
+    return None
+
+
+def call_gemini_cached(
+    prompt: str,
+    api_key: str,
+    model: str,
+    cache_name: str,
+    temperature: float = 0.0,
+    max_output_tokens: int = 65536,
+    timeout: int = 300,
+    max_retries: int = 3,
+    response_schema: Optional[dict] = None,
+) -> str:
+    """Call Gemini API using a cached system prompt.
+
+    Same as ``call_gemini()`` but references a cached content entry
+    instead of resending the system prompt. Falls back to
+    ``call_gemini()`` if the cached call fails with a 4xx error.
+
+    Parameters
+    ----------
+    prompt : str
+        The data prompt text (system prompt is in the cache).
+    api_key : str
+        Gemini API key.
+    model : str
+        Full model name (e.g. "gemini-3.0-flash").
+    cache_name : str
+        Cache name from ``create_gemini_cache()``.
+    temperature : float
+        Sampling temperature. Default 0.0.
+    max_output_tokens : int
+        Max tokens in response.
+    timeout : int
+        Request timeout in seconds.
+    max_retries : int
+        Maximum retries on 429/503 errors.
+    response_schema : dict, optional
+        JSON schema for structured output.
+
+    Returns
+    -------
+    str
+        Model response text.
+    """
+    import requests
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent?key={api_key}"
+    )
+
+    generation_config = {
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens,
+        "responseMimeType": "application/json",
+    }
+    if response_schema:
+        generation_config["responseSchema"] = response_schema
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": generation_config,
+        "cachedContent": cache_name,
+    }
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+
+            # If cache reference fails with 4xx, fall back to non-cached call
+            if resp.status_code in (400, 404) and attempt == 0:
+                print(f"    Cache call failed (HTTP {resp.status_code}), falling back to full prompt...")
+                return call_gemini(
+                    prompt, api_key, model,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    response_schema=response_schema,
+                )
+
+            # Handle rate limiting (429) and server overload (503) with retry
+            if resp.status_code in (429, 503) and attempt < max_retries:
+                wait = 40
+                try:
+                    error_body = resp.json().get("error", {})
+                    details = error_body.get("details", [])
+                    for d in details:
+                        if d.get("@type", "").endswith("RetryInfo"):
+                            delay_str = d.get("retryDelay", "40s")
+                            wait = int(float(delay_str.rstrip("s"))) + 2
+                except Exception:
+                    pass
+                label = "Rate limited" if resp.status_code == 429 else "Server overloaded"
+                print(f"    {label} (HTTP {resp.status_code}): waiting {wait}s "
+                      f"(retry {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            candidate = data["candidates"][0]
+            finish_reason = candidate.get("finishReason", "")
+            if finish_reason == "MAX_TOKENS":
+                raise RuntimeError(
+                    "Gemini response truncated (MAX_TOKENS). "
+                    "Increase max_output_tokens or reduce batch_size."
+                )
+            return candidate["content"]["parts"][0]["text"]
+
+        except requests.exceptions.HTTPError as e:
+            if resp.status_code in (429, 503):
+                raise RuntimeError(
+                    f"Gemini API (HTTP {resp.status_code}) failed after {max_retries} retries."
+                ) from e
+            raise RuntimeError(
+                f"Gemini API error: {e.response.status_code} - {e.response.text}"
+            ) from e
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(
+                f"Unexpected Gemini API response format: {e}"
+            ) from e
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Gemini API request failed: {e}") from e
+
+    raise RuntimeError(f"Gemini API failed after {max_retries} retries")
+
+
+def delete_gemini_cache(cache_name: str, api_key: str) -> None:
+    """Delete a Gemini cached content entry (best-effort).
+
+    Parameters
+    ----------
+    cache_name : str
+        Cache name (e.g. "cachedContents/abc123").
+    api_key : str
+        Gemini API key.
+    """
+    import requests
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/{cache_name}?key={api_key}"
+    try:
+        requests.delete(url, timeout=10)
+    except Exception:
+        pass

@@ -152,9 +152,14 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# OMOP vocab data
-src/tctk/omop/*
-!src/tctk/omop/__init__.py
+# OMOP vocab data (Athena CSVs + built DuckDB — ~2GB)
+src/tctk/omop/vocab/v*/
+
+# CDC data (downloaded XML/ZIP — ~50MB)
+src/tctk/cdc/data/
+
+# Mapping checkpoints (parquet + JSON — can be large)
+checkpoints/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
@@ -173,5 +178,6 @@ src/tctk/omop/*
 # Dev devnotebooks
 devnotebooks/
 
-# Local env
-.env
+# Claude Code project instructions
+CLAUDE.md
+.claude/rules/

@@ -1,15 +1,10 @@
-"""Backwards-compatibility shim — use ``tctk.aou`` instead."""
-
 import importlib as _importlib
-import warnings as _warnings
-
-_warnings.warn(
-    "tctk.aou_tools is deprecated; use tctk.aou instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 __all__ = ["Dsub", "SocioEconomicStatus", "Demographic", "GWAS"]
+
+# Lazy imports — these modules depend on the All of Us workbench
+# environment (OWNER_EMAIL, WORKSPACE_CDR, etc.), so we defer
+# importing until the classes are actually used.
 
 def __getattr__(name):
     _map = {
@@ -22,4 +17,4 @@ def __getattr__(name):
         mod_path, attr = _map[name]
         mod = _importlib.import_module(mod_path)
         return getattr(mod, attr)
-    raise AttributeError(f"module 'tctk.aou_tools' has no attribute {name!r}")
+    raise AttributeError(f"module 'tctk.aou' has no attribute {name!r}")
