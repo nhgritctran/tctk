@@ -27,6 +27,7 @@ Setup:
 """
 
 import io
+import json
 import re
 import sys
 from contextlib import contextmanager
@@ -36,6 +37,9 @@ import polars as pl
 from tqdm.auto import tqdm
 
 from tctk._utils import (
+    call_gemini,
+    check_api_key,
+    sql_escape,
     strip_accents,
     write_tsv_bom,
 )
@@ -52,6 +56,11 @@ __all__ = ["Condition2ICD"]
 def _capture_prints():
     """Capture stdout while still printing to terminal.
 
+    Self-healing: if a previous run was interrupted and left a stale
+    _Tee as sys.stdout, unwraps it to find the real stream before
+    replacing. This prevents stacked _Tee objects that break Jupyter
+    output on cell re-run.
+
     Usage::
 
         with _capture_prints() as buf:
@@ -59,9 +68,13 @@ def _capture_prints():
         captured = buf.getvalue()
     """
     buf = io.StringIO()
+    # Unwrap any stale _Tee from a previous interrupted run
     original = sys.stdout
+    while hasattr(original, "_tee_original"):
+        original = original._tee_original
     # Tee: write to both original stdout and buffer
     class _Tee:
+        _tee_original = original
         def write(self, s):
             original.write(s)
             buf.write(s)
@@ -262,7 +275,7 @@ class Condition2ICD(ConditionMapperBase):
         """Normalize text for fuzzy matching, matching _build_input conventions.
 
         Applies: strip accents, lowercase, hyphen→space, strip possessives ('s),
-        strip parentheticals, collapse whitespace.
+        strip parentheticals/brackets, strip punctuation, collapse whitespace.
 
         Note: Smart/curly quotes are normalized once at the input entry point
         (_build_input), so they are already straight quotes by the time text
@@ -273,6 +286,9 @@ class Condition2ICD(ConditionMapperBase):
         t = t.replace("-", " ")
         t = re.sub(r"'s\b", "", t)
         t = re.sub(r"\s*\([^)]*\)", "", t)
+        t = re.sub(r"\s*\[[^\]]*\]", "", t)      # strip []
+        for ch in ',:;"/':
+            t = t.replace(ch, " ")
         t = re.sub(r"\s+", " ", t)
         return t.strip()
 
@@ -369,26 +385,28 @@ class Condition2ICD(ConditionMapperBase):
             if hits10:
                 for hit in hits10:
                     code = hit["code"]
-                    name = hit["name"]
+                    cdc_name = hit.get("cdc_name", hit["name"])
                     score = hit["score"]
                     new_match_rows.append({
                         "condition_name": condition_name,
                         "search_term": search_term,
-                        "matched_concept_synonym": name,
+                        "_cdc_matched_query": hit.get("matched_query", search_term),
+                        "matched_concept_synonym": hit["name"],
                         "concept_id": None,
                         "concept_code": code,
-                        "concept_name": name,
                         "vocabulary_id": "ICD10CM",
                         "concept_class_id": None,
                         "standard_concept": None,
                         "match_type": "exact" if score == 100 else "fuzzy",
                         "match_score": score,
                         "icd_concept_id": code,
-                        "icd_concept_name": name,
+                        "icd_concept_name": cdc_name,
                         "icd_code": code,
                         "icd_version": "10",
                         "top_level_code": code[:3] if len(code) >= 3 else code,
                         "has_confirmed_sibling": False,
+                        "match_source": "cdc",
+                        "match_threshold": fuzzy_threshold,
                     })
 
             # ICD-9 matches
@@ -396,26 +414,28 @@ class Condition2ICD(ConditionMapperBase):
             if hits9:
                 for hit in hits9:
                     code = hit["code"]
-                    name = hit["name"]
+                    cdc_name = hit.get("cdc_name", hit["name"])
                     score = hit["score"]
                     new_match_rows.append({
                         "condition_name": condition_name,
                         "search_term": search_term,
-                        "matched_concept_synonym": name,
+                        "_cdc_matched_query": hit.get("matched_query", search_term),
+                        "matched_concept_synonym": hit["name"],
                         "concept_id": None,
                         "concept_code": code,
-                        "concept_name": name,
                         "vocabulary_id": "ICD9CM",
                         "concept_class_id": None,
                         "standard_concept": None,
                         "match_type": "exact" if score == 100 else "fuzzy",
                         "match_score": score,
                         "icd_concept_id": code,
-                        "icd_concept_name": name,
+                        "icd_concept_name": cdc_name,
                         "icd_code": code,
                         "icd_version": "9",
                         "top_level_code": code[:3] if len(code) >= 3 else code,
                         "has_confirmed_sibling": False,
+                        "match_source": "cdc",
+                        "match_threshold": fuzzy_threshold,
                     })
 
         n_new_icd10 = 0
@@ -438,17 +458,27 @@ class Condition2ICD(ConditionMapperBase):
         # Group by [condition_name, search_term, icd_concept_name, icd_code, icd_version]
         # Keep best: exact > fuzzy, then highest score
         # Sort: exact first (alphabetically "exact" < "fuzzy"), then score desc
+        dedup_key = ["condition_name", "search_term", "icd_concept_name",
+                     "icd_code", "icd_version"]
+
+        # Aggregate sources before dedup (e.g. "cdc+omop" when both matched)
+        source_agg = (
+            df_matches
+            .group_by(dedup_key)
+            .agg(pl.col("match_source").unique().sort().str.join("+").alias("_merged_source"))
+        )
+
         n_before_dedup = len(df_matches)
         df_matches = (
-            df_matches
+            df_matches.drop("match_source")
             .sort(["match_type", "match_score"], descending=[False, True])
-            .unique(
-                subset=["condition_name", "search_term", "icd_concept_name",
-                        "icd_code", "icd_version"],
-                keep="first",
-            )
+            .unique(subset=dedup_key, keep="first")
         )
         n_deduped = n_before_dedup - len(df_matches)
+
+        # Join merged source back
+        df_matches = df_matches.join(source_agg, on=dedup_key, how="left")
+        df_matches = df_matches.rename({"_merged_source": "match_source"})
 
         # ---- Recompute has_confirmed_sibling from all exact matches ----
         confirmed_top_codes = (
@@ -732,6 +762,16 @@ class Condition2ICD(ConditionMapperBase):
                 print(f"\n  Auto-threshold: already at cap. "
                       f"Keeping threshold={fuzzy_threshold}.")
 
+        # Replace search_term with processed query for CDC rows (display only).
+        # Raw search_term was kept above for correct dedup grouping.
+        if "_cdc_matched_query" in df_matches.columns:
+            df_matches = df_matches.with_columns(
+                pl.when(pl.col("_cdc_matched_query").is_not_null())
+                .then(pl.col("_cdc_matched_query"))
+                .otherwise(pl.col("search_term"))
+                .alias("search_term")
+            ).drop("_cdc_matched_query")
+
         results["df_matches"] = df_matches
         return results
 
@@ -746,6 +786,8 @@ class Condition2ICD(ConditionMapperBase):
         icdcm_lookup: bool = True,
         auto_threshold: bool = True,
         auto_threshold_max: int = 90,
+        fallback_step: int = 5,
+        fallback_floor: int = 50,
         icd9cm_index_path: Optional[str] = None,
         icd10cm_index_path: Optional[str] = None,
         ai_review: bool = False,
@@ -781,6 +823,14 @@ class Condition2ICD(ConditionMapperBase):
         auto_threshold_max : int
             Ceiling for the auto-threshold sweep (default 90).  The sweep
             will raise the effective threshold up to this value.
+        fallback_step : int
+            After the main pass, re-run OMOP + CDC lookup at progressively
+            lower thresholds for conditions with zero hits.  Each iteration
+            lowers the threshold by this amount (default 5).  Set to 0 to
+            disable fallback.
+        fallback_floor : int
+            Lowest threshold the fallback loop will try (default 50).
+            Conditions still unmapped at the floor are reported as unmapped.
         icd9cm_index_path : str, optional
             Path to pre-extracted ICD-9-CM text file for offline mode.
         icd10cm_index_path : str, optional
@@ -871,7 +921,8 @@ class Condition2ICD(ConditionMapperBase):
                       "mapper.set_api_key(key_file='path.json')\n"
                       "  Get a free key at: https://aistudio.google.com/apikey")
                 do_ai_review = False
-        n_steps = 2 + (1 if icdcm_lookup else 0) + (1 if do_ai_review else 0)
+        do_fallback = fallback_step > 0 and icdcm_lookup
+        n_steps = 2 + (1 if icdcm_lookup else 0) + (1 if do_fallback else 0) + (1 if do_ai_review else 0)
         step = 0
 
         # Capture all print output for later replay via print_summary()
@@ -914,6 +965,12 @@ class Condition2ICD(ConditionMapperBase):
         # has_confirmed_sibling is computed later (step 4 or before AI review)
         df_matches = df_matches.with_columns(
             pl.lit(False).alias("has_confirmed_sibling")
+        )
+
+        # Tag OMOP rows
+        df_matches = df_matches.with_columns(
+            pl.lit("omop").alias("match_source"),
+            pl.lit(fuzzy_threshold).alias("match_threshold"),
         )
 
         if not do_ai_review and fuzzy_threshold < 85 and len(df_fuzzy) > 0:
@@ -961,6 +1018,104 @@ class Condition2ICD(ConditionMapperBase):
                 .drop("_has_sibling")
             )
             results["df_matches"] = df_matches
+
+        # ---- Fallback loop for unmapped conditions ----
+        if do_fallback:
+            step += 1
+            all_conds = set(df_input["condition_name"].unique().to_list())
+            matched_conds = set(df_matches["condition_name"].unique().to_list())
+            unmapped_conds = all_conds - matched_conds
+
+            fb_threshold = fuzzy_threshold - fallback_step
+            fb_stats = []  # [(threshold, n_newly_matched)]
+
+            if unmapped_conds and fb_threshold >= fallback_floor:
+                print(f"\n\033[1m[{step}/{n_steps}] Fallback for {len(unmapped_conds)} unmapped conditions...\033[0m")
+            else:
+                print(f"\n\033[1m[{step}/{n_steps}] Fallback: no unmapped conditions, skipping.\033[0m")
+
+            while unmapped_conds and fb_threshold >= fallback_floor:
+                print(f"\n  --- Fallback pass (threshold={fb_threshold}) ---")
+                print(f"  Unmapped conditions: {len(unmapped_conds)}")
+
+                # Filter input to unmapped conditions only
+                df_input_fb = df_input.filter(
+                    pl.col("condition_name").is_in(list(unmapped_conds))
+                )
+
+                # OMOP lookup at lower threshold
+                df_exact_fb, df_fuzzy_fb = self._omop_lookup(
+                    df_input_fb, vocab="ICD", fuzzy_threshold=fb_threshold,
+                )
+
+                # Prepare OMOP fallback matches (same column setup as main pass)
+                df_fb = pl.concat([df_exact_fb, df_fuzzy_fb], how="diagonal_relaxed")
+                df_fb = df_fb.with_columns(pl.col("concept_id").cast(pl.Utf8))
+                df_fb = df_fb.with_columns(
+                    pl.col("concept_id").alias("icd_concept_id"),
+                    pl.col("concept_name").alias("icd_concept_name"),
+                    pl.col("concept_code").alias("icd_code"),
+                    pl.when(pl.col("vocabulary_id") == "ICD9CM")
+                    .then(pl.lit("9"))
+                    .when(pl.col("vocabulary_id") == "ICD10CM")
+                    .then(pl.lit("10"))
+                    .otherwise(pl.col("vocabulary_id"))
+                    .alias("icd_version"),
+                )
+                df_fb = df_fb.with_columns(
+                    pl.col("icd_code").str.slice(0, 3).alias("top_level_code"),
+                    pl.lit(False).alias("has_confirmed_sibling"),
+                    pl.lit("omop").alias("match_source"),
+                    pl.lit(fb_threshold).alias("match_threshold"),
+                )
+
+                # CDC lookup at lower threshold (no auto-threshold)
+                fb_results = {
+                    "df_input": df_input_fb,
+                    "df_exact": df_exact_fb,
+                    "df_fuzzy": df_fuzzy_fb,
+                    "df_matches": df_fb,
+                }
+                fb_results = self._icdcm_lookup(
+                    fb_results,
+                    fuzzy_threshold=fb_threshold,
+                    icd9cm_index_path=icd9cm_index_path,
+                    icd10cm_index_path=icd10cm_index_path,
+                    auto_threshold=False,
+                )
+                df_fb = fb_results["df_matches"]
+
+                # Count newly matched conditions
+                if len(df_fb) > 0:
+                    new_matched = set(df_fb["condition_name"].unique().to_list()) & unmapped_conds
+                    if new_matched:
+                        fb_stats.append((fb_threshold, len(new_matched)))
+                        df_matches = pl.concat(
+                            [df_matches, df_fb], how="diagonal_relaxed"
+                        )
+                        unmapped_conds -= new_matched
+                        print(f"  Matched {len(new_matched)} new conditions")
+                    else:
+                        print(f"  No new conditions matched")
+                else:
+                    print(f"  No new conditions matched")
+
+                fb_threshold -= fallback_step
+
+            # Summary
+            if fb_stats:
+                total_rescued = sum(n for _, n in fb_stats)
+                parts = [f"{n} at {t}" for t, n in fb_stats]
+                print(f"\n  Fallback total: {total_rescued} conditions rescued "
+                      f"({', '.join(parts)})")
+                if unmapped_conds:
+                    print(f"  Still unmapped: {len(unmapped_conds)} conditions")
+            elif unmapped_conds:
+                print(f"  Fallback: no new matches found. "
+                      f"{len(unmapped_conds)} conditions remain unmapped.")
+
+            results["df_matches"] = df_matches
+            results["_fallback_stats"] = fb_stats
 
         if do_ai_review:
             step += 1
@@ -1015,6 +1170,8 @@ class Condition2ICD(ConditionMapperBase):
             "top_level_code": pl.col("top_level_code"),
             "has_confirmed_sibling": pl.col("has_confirmed_sibling"),
             "fuzzy_score": pl.col("match_score"),
+            "match_source": pl.col("match_source"),
+            "match_threshold": pl.col("match_threshold"),
         }
 
         df_review = df_final.select(**review_cols)
@@ -1090,6 +1247,8 @@ class Condition2ICD(ConditionMapperBase):
                     "ai_comment_consistency_tier": None,
                     "ai_combined_confidence": None,
                     "is_rescued": False,
+                    "match_source": None,
+                    "match_threshold": None,
                 }
                 for cond, term in unmatched_pairs
             ]
@@ -1174,11 +1333,9 @@ class Condition2ICD(ConditionMapperBase):
         n_conditions = len(conditions)
         n_mapped = df_accepted["condition_name"].n_unique() if len(df_accepted) > 0 else 0
         n_unmapped = n_conditions - n_mapped
+        n_search_terms = len(df_input)
 
-        n_exact = len(df_review.filter(pl.col("match_type") == "exact"))
-        n_fuzzy = len(df_review.filter(pl.col("match_type") == "fuzzy"))
         n_no_match = len(df_review.filter(pl.col("ai_verdict") == "no match"))
-        n_human_review = len(df_human_review)
 
         # Rescue counts per category
         has_rescue = "is_rescued" in df_review.columns
@@ -1190,23 +1347,105 @@ class Condition2ICD(ConditionMapperBase):
         )) if has_rescue else 0
         n_rescued_total = n_rescued_accepted + n_rescued_human + n_rescued_rejected
 
-        def _rescue_note(n):
-            return f" [{n} rescued]" if n > 0 else ""
+        # --- Per-verdict breakdown helpers ---
+        def _verdict_counts(df_subset):
+            """Return (n_exact, n_fuzzy, n_rescued, n_omop, n_cdc, n_both) for a df subset."""
+            if len(df_subset) == 0:
+                return 0, 0, 0, 0, 0, 0
+            n_ex = len(df_subset.filter(pl.col("match_type") == "exact"))
+            n_fz = len(df_subset.filter(pl.col("match_type") == "fuzzy"))
+            n_res = len(df_subset.filter(_rescue_filter)) if has_rescue else 0
+            has_src = "match_source" in df_subset.columns
+            n_omop = len(df_subset.filter(pl.col("match_source") == "omop")) if has_src else 0
+            n_cdc = len(df_subset.filter(pl.col("match_source") == "cdc")) if has_src else 0
+            n_both = len(df_subset.filter(pl.col("match_source") == "cdc+omop")) if has_src else 0
+            return n_ex, n_fz, n_res, n_omop, n_cdc, n_both
+
+        acc_counts = _verdict_counts(df_acc_flat)
+        hr_counts = _verdict_counts(df_human_review)
+        # Rejected excluding no-match (no-match has no match_type/source)
+        df_rej_matched = df_rejected.filter(pl.col("ai_verdict") != "no match")
+        rej_counts = _verdict_counts(df_rej_matched)
+
+        n_acc = len(df_acc_flat)
+        n_hr = len(df_human_review)
+        n_rej_matched = len(df_rej_matched)
+
+        # Totals (matched rows only)
+        t_hits = n_acc + n_hr + n_rej_matched
+        t_exact = acc_counts[0] + hr_counts[0] + rej_counts[0]
+        t_fuzzy = acc_counts[1] + hr_counts[1] + rej_counts[1]
+        t_rescued = acc_counts[2] + hr_counts[2] + rej_counts[2]
+        t_omop = acc_counts[3] + hr_counts[3] + rej_counts[3]
+        t_cdc = acc_counts[4] + hr_counts[4] + rej_counts[4]
+        t_both = acc_counts[5] + hr_counts[5] + rej_counts[5]
+
+        # Determine which optional columns to show
+        show_rescue = n_rescued_total > 0
+        show_source = "match_source" in df_review.columns
+
+        # Build header and rows
+        hdr = ["Verdict", "Hits", "Exact", "Fuzzy"]
+        if show_rescue:
+            hdr.append("Rescued")
+        if show_source:
+            hdr.extend(["OMOP", "CDC", "Both"])
+
+        def _row(label, hits, exact, fuzzy, rescued, omop, cdc, both, dash_extra=False):
+            vals = [label, str(hits), str(exact), str(fuzzy)]
+            if show_rescue:
+                vals.append(str(rescued) if not dash_extra else "\u2014")
+            if show_source:
+                if dash_extra:
+                    vals.extend(["\u2014", "\u2014", "\u2014"])
+                else:
+                    vals.extend([str(omop), str(cdc), str(both)])
+            return vals
+
+        rows = [
+            _row("Accepted", n_acc, *acc_counts),
+            _row("Human review", n_hr, *hr_counts),
+            _row("Rejected", n_rej_matched, *rej_counts),
+            _row("No match", n_no_match, "\u2014", "\u2014", 0, 0, 0, 0, dash_extra=True),
+        ]
+        totals = _row("Total", t_hits + n_no_match, t_exact, t_fuzzy,
+                       t_rescued, t_omop, t_cdc, t_both)
+
+        # Compute column widths
+        col_w = [max(len(hdr[i]), *(len(r[i]) for r in rows), len(totals[i]))
+                 for i in range(len(hdr))]
+        # First column left-aligned, rest right-aligned
+        def _fmt(vals):
+            parts = [vals[0].ljust(col_w[0])]
+            parts.extend(vals[i].rjust(col_w[i]) for i in range(1, len(vals)))
+            return "  " + " | ".join(parts)
+
+        sep = "  " + "-" * col_w[0] + "-+-" + "-+-".join("-" * col_w[i] for i in range(1, len(hdr)))
 
         print(f"\n{'=' * 40}")
         print(f"  FINAL SUMMARY")
         print(f"{'=' * 40}")
-        print(f"  Conditions: {n_mapped} mapped, {n_unmapped} unmapped (of {n_conditions} total)")
-        print(f"  Accepted:     {len(df_acc_flat)} matches{_rescue_note(n_rescued_accepted)}")
-        print(f"  Human review: {n_human_review} matches{_rescue_note(n_rescued_human)}")
-        print(f"  Rejected:     {len(df_rejected)} matches (incl. {n_no_match} no-match)"
-              f"{_rescue_note(n_rescued_rejected)}")
-        print(f"")
-        print(f"  Match breakdown:")
-        print(f"    Exact matches:             {n_exact}")
-        print(f"    Fuzzy matches:             {n_fuzzy}")
-        if n_rescued_total > 0:
-            print(f"    Rescued matches:           {n_rescued_total} (included in fuzzy above)")
+        print(f"  Conditions: {n_mapped} mapped, {n_unmapped} unmapped (of {n_conditions})")
+        print(f"  Search terms: {n_search_terms}")
+        print(f"{'-' * 40}")
+        print(_fmt(hdr))
+        print(sep)
+        for r in rows:
+            print(_fmt(r))
+        print(sep)
+        print(_fmt(totals))
+        print(f"{'-' * 40}")
+
+        # ICD version breakdown (accepted)
+        if len(df_accepted) > 0:
+            version_counts = df_accepted.group_by("icd_version").agg(
+                pl.col("n_codes").sum().alias("total_codes"),
+                pl.len().alias("n_condition_version_pairs"),
+            ).sort("icd_version")
+            for row in version_counts.iter_rows(named=True):
+                label = f"ICD-{row['icd_version']}-CM"
+                print(f"  {label}: {row['total_codes']} codes, "
+                      f"{row['n_condition_version_pairs']} conditions")
 
         # Hits per condition (only conditions with >=1 match)
         df_with_hits = df_review.filter(pl.col("icd_code").is_not_null())
@@ -1216,24 +1455,11 @@ class Condition2ICD(ConditionMapperBase):
                 .agg(pl.len().alias("n_hits"))
                 ["n_hits"]
             )
-            print(f"")
-            print(f"  Hits per condition: "
-                  f"min={hits_per_cond.min()}, "
-                  f"max={hits_per_cond.max()}, "
-                  f"median={hits_per_cond.median():.0f}, "
-                  f"mean={hits_per_cond.mean():.1f}")
-
-        if len(df_accepted) > 0:
-            version_counts = df_accepted.group_by("icd_version").agg(
-                pl.col("n_codes").sum().alias("total_codes"),
-                pl.len().alias("n_condition_version_pairs"),
-            ).sort("icd_version")
-            print(f"")
-            print(f"  Accepted ICD version breakdown:")
-            for row in version_counts.iter_rows(named=True):
-                label = f"ICD-{row['icd_version']}-CM"
-                print(f"    {label}: {row['total_codes']} codes across "
-                      f"{row['n_condition_version_pairs']} conditions")
+            print(f"  Hits/condition: "
+                  f"min={hits_per_cond.min()} "
+                  f"max={hits_per_cond.max()} "
+                  f"med={hits_per_cond.median():.0f} "
+                  f"\u03bc={hits_per_cond.mean():.1f}")
 
         if has_ai_cols:
             reviewed = df_review.filter(
@@ -1243,12 +1469,20 @@ class Condition2ICD(ConditionMapperBase):
             if len(reviewed) > 0:
                 verdicts = reviewed.group_by("ai_verdict").len().sort("ai_verdict")
                 parts = [f"{r['ai_verdict']}={r['len']}" for r in verdicts.iter_rows(named=True)]
-                print(f"  AI review:  {len(reviewed)} reviewed ({', '.join(parts)})")
+                print(f"  AI reviewed: {len(reviewed)} ({', '.join(parts)})")
                 if "ai_combined_confidence" in reviewed.columns:
-                    rel = reviewed.filter(pl.col("ai_combined_confidence").is_not_null()).group_by("ai_combined_confidence").len().sort("ai_combined_confidence")
+                    rel = reviewed.filter(
+                        pl.col("ai_combined_confidence").is_not_null()
+                    ).group_by("ai_combined_confidence").len().sort("ai_combined_confidence")
                     if len(rel) > 0:
                         rel_parts = [f"{r['ai_combined_confidence']}={r['len']}" for r in rel.iter_rows(named=True)]
                         print(f"  AI reliability: {', '.join(rel_parts)}")
+
+        fb_stats = results.get("_fallback_stats", [])
+        if fb_stats:
+            fb_total = sum(n for _, n in fb_stats)
+            fb_parts = [f"{n} at {t}" for t, n in fb_stats]
+            print(f"  Fallback: {fb_total} conditions rescued ({', '.join(fb_parts)})")
         print(f"{'=' * 40}")
 
         # --- Export ---
@@ -1272,3 +1506,686 @@ class Condition2ICD(ConditionMapperBase):
         results["_run_log"] = _buf.getvalue()
 
         return results
+
+    # -------------------------------------------------------------------
+    # ICD → SNOMED mapping
+    # -------------------------------------------------------------------
+
+    def icd_to_snomed(self, df_accepted: pl.DataFrame) -> dict:
+        """Map accepted ICD codes (+ descendants) to SNOMED via OMOP concept_relationship.
+
+        Takes the grouped ``df_accepted`` from :meth:`map` and:
+
+        1. Explodes comma-separated ICD codes to flat rows
+        2. Expands each code to all descendant codes (prefix match)
+        3. Maps expanded ICD concept IDs → SNOMED via ``concept_relationship``
+        4. Joins SNOMED results back to conditions
+        5. Detects overlapping SNOMED concepts (shared by 2+ conditions)
+
+        Parameters
+        ----------
+        df_accepted : pl.DataFrame
+            Grouped output from ``map()`` with comma-separated ``icd_codes``.
+
+        Returns
+        -------
+        dict
+            ``df_snomed``   – full condition → SNOMED mapping
+            ``df_overlaps`` – SNOMED concepts shared by 2+ conditions
+        """
+        _empty_snomed = pl.DataFrame(schema={
+            "condition_name": pl.Utf8, "source_icd_code": pl.Utf8,
+            "icd_version": pl.Utf8, "icd_code": pl.Utf8,
+            "icd_concept_name": pl.Utf8,
+            "snomed_concept_id": pl.Int64, "snomed_code": pl.Utf8,
+            "snomed_name": pl.Utf8,
+        })
+        _empty_overlaps = pl.DataFrame(schema={
+            "snomed_concept_id": pl.Int64, "snomed_code": pl.Utf8,
+            "snomed_name": pl.Utf8, "n_conditions": pl.UInt32,
+            "conditions": pl.Utf8, "icd_codes": pl.Utf8,
+        })
+
+        # ── Step 1: Explode comma-separated ICD codes to flat rows ──
+        df_exploded = (
+            df_accepted
+            .select("condition_name", "icd_version", "icd_codes")
+            .with_columns(pl.col("icd_codes").str.split(", ").alias("_codes"))
+            .explode("_codes")
+            .rename({"_codes": "icd_code"})
+            .drop("icd_codes")
+            .filter(pl.col("icd_code").is_not_null() & (pl.col("icd_code") != ""))
+            .with_columns(
+                pl.when(pl.col("icd_version").cast(pl.Utf8) == "10")
+                .then(pl.lit("ICD10CM"))
+                .otherwise(pl.lit("ICD9CM"))
+                .alias("vocabulary_id")
+            )
+        )
+
+        unique_codes = df_exploded["icd_code"].unique().to_list()
+        if not unique_codes:
+            return {"df_snomed": _empty_snomed, "df_overlaps": _empty_overlaps}
+
+        # ── Step 2: Expand to descendants via vocab DuckDB ──────────
+        starts = " OR ".join(
+            f"STARTS_WITH(concept_code, '{sql_escape(c)}')"
+            for c in unique_codes
+        )
+        df_icd_all = self._query(f"""
+            SELECT concept_id, concept_code, concept_name, vocabulary_id
+            FROM concept
+            WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM')
+              AND invalid_reason IS NULL
+              AND ({starts})
+        """)
+
+        icd_ids = df_icd_all["concept_id"].to_list()
+        if not icd_ids:
+            return {"df_snomed": _empty_snomed, "df_overlaps": _empty_overlaps}
+
+        # ── Step 3: Map expanded ICD → SNOMED via concept_relationship
+        id_list = ", ".join(str(i) for i in icd_ids)
+        df_icd_snomed = self._query(f"""
+            SELECT
+                c_icd.concept_id   AS icd_concept_id,
+                c_icd.concept_code AS icd_code,
+                c_icd.concept_name AS icd_concept_name,
+                c_icd.vocabulary_id,
+                c_snomed.concept_id   AS snomed_concept_id,
+                c_snomed.concept_code AS snomed_code,
+                c_snomed.concept_name AS snomed_name
+            FROM concept_relationship cr
+            JOIN concept c_icd    ON cr.concept_id_1 = c_icd.concept_id
+            JOIN concept c_snomed ON cr.concept_id_2 = c_snomed.concept_id
+            WHERE cr.relationship_id = 'Maps to'
+              AND c_snomed.vocabulary_id = 'SNOMED'
+              AND c_snomed.standard_concept = 'S'
+              AND cr.invalid_reason IS NULL
+              AND c_icd.concept_id IN ({id_list})
+        """)
+
+        if len(df_icd_snomed) == 0:
+            return {"df_snomed": _empty_snomed, "df_overlaps": _empty_overlaps}
+
+        # ── Step 4: Join back to conditions (prefix match) ──────────
+        # Cross-join exploded conditions with ICD→SNOMED results within
+        # each vocabulary, then filter by prefix match.
+        df_snomed = (
+            df_exploded
+            .rename({"icd_code": "source_icd_code"})
+            .join(df_icd_snomed, on="vocabulary_id", how="inner")
+            .filter(
+                pl.col("icd_code").str.starts_with(pl.col("source_icd_code"))
+            )
+            .select(
+                "condition_name", "source_icd_code", "icd_version",
+                "icd_code", "icd_concept_name",
+                "snomed_concept_id", "snomed_code", "snomed_name",
+            )
+            .unique()
+        )
+
+        # ── Step 5: Detect overlaps ─────────────────────────────────
+        df_overlaps = (
+            df_snomed
+            .group_by("snomed_concept_id", "snomed_code", "snomed_name")
+            .agg(
+                pl.col("condition_name").n_unique().alias("n_conditions"),
+                pl.col("condition_name").unique().sort()
+                    .str.concat(", ").alias("conditions"),
+                pl.col("icd_code").unique().sort()
+                    .str.concat(", ").alias("icd_codes"),
+            )
+            .filter(pl.col("n_conditions") >= 2)
+            .sort("n_conditions", descending=True)
+        )
+
+        # ── Step 6: Print summary ──────────────────────────────────
+        n_icd10 = df_exploded.filter(
+            pl.col("icd_version").cast(pl.Utf8) == "10"
+        ).height
+        n_icd9 = df_exploded.filter(
+            pl.col("icd_version").cast(pl.Utf8) == "9"
+        ).height
+        n_expanded = df_icd_all["concept_id"].n_unique()
+        n_snomed = (
+            df_snomed["snomed_concept_id"].n_unique()
+            if len(df_snomed) > 0 else 0
+        )
+        n_overlap = len(df_overlaps)
+        n_overlap_conds = (
+            df_overlaps["conditions"].str.split(", ").explode().n_unique()
+            if n_overlap > 0 else 0
+        )
+
+        print(f"\n{'=' * 40}")
+        print(f"  ICD \u2192 SNOMED MAPPING")
+        print(f"{'=' * 40}")
+        print(f"  Accepted ICD codes:    {len(unique_codes)}"
+              f" ({n_icd10} ICD-10, {n_icd9} ICD-9)")
+        print(f"  Expanded descendants:  {n_expanded}")
+        print(f"  SNOMED concepts:       {n_snomed}")
+        print(f"  Overlapping:           {n_overlap} concepts"
+              f" across {n_overlap_conds} conditions")
+        print(f"{'=' * 40}")
+
+        # ── Condition-level summary ───────────────────────────────────
+        # ICD codes per condition (from exploded input)
+        icd_per_cond = (
+            df_exploded
+            .group_by("condition_name")
+            .agg(pl.col("icd_code").n_unique().alias("n_icd"))
+        )
+
+        # SNOMED concepts per condition
+        snomed_per_cond = (
+            df_snomed
+            .group_by("condition_name")
+            .agg(pl.col("snomed_concept_id").n_unique().alias("n_snomed"))
+        ) if len(df_snomed) > 0 else pl.DataFrame(
+            schema={"condition_name": pl.Utf8, "n_snomed": pl.UInt32}
+        )
+
+        # Overlapping SNOMED concepts per condition
+        if n_overlap > 0:
+            overlap_per_cond = (
+                df_overlaps
+                .select(
+                    pl.col("snomed_concept_id"),
+                    pl.col("conditions").str.split(", "),
+                )
+                .explode("conditions")
+                .rename({"conditions": "condition_name"})
+                .group_by("condition_name")
+                .agg(
+                    pl.col("snomed_concept_id").n_unique()
+                        .alias("n_overlaps"),
+                )
+            )
+        else:
+            overlap_per_cond = pl.DataFrame(
+                schema={"condition_name": pl.Utf8, "n_overlaps": pl.UInt32}
+            )
+
+        df_condition_summary = (
+            icd_per_cond
+            .join(snomed_per_cond, on="condition_name", how="left")
+            .join(overlap_per_cond, on="condition_name", how="left")
+            .with_columns(
+                pl.col("n_snomed").fill_null(0),
+                pl.col("n_overlaps").fill_null(0),
+            )
+            .sort(
+                pl.col("n_overlaps").cast(pl.Int64),
+                "condition_name",
+                descending=[True, False],
+            )
+        )
+
+        # Print condition-level table
+        cond_rows = df_condition_summary.iter_rows(named=True)
+        max_name = max(
+            len(r["condition_name"])
+            for r in df_condition_summary.iter_rows(named=True)
+        )
+        max_name = min(max(max_name, 20), 44)  # clamp width
+
+        hdr_cond = "Condition"
+        hdr_icd = "ICD"
+        hdr_sno = "SNOMED"
+        hdr_ovl = "Overlaps"
+        w_icd = max(len(hdr_icd), 3)
+        w_sno = max(len(hdr_sno), 4)
+        w_ovl = max(len(hdr_ovl), 4)
+
+        sep_line = (
+            f"  {'─' * max_name}─┼─"
+            f"{'─' * w_icd}─┼─"
+            f"{'─' * w_sno}─┼─"
+            f"{'─' * w_ovl}"
+        )
+
+        print(f"\n  {hdr_cond:<{max_name}} | "
+              f"{hdr_icd:>{w_icd}} | "
+              f"{hdr_sno:>{w_sno}} | "
+              f"{hdr_ovl:>{w_ovl}}")
+        print(sep_line)
+        for row in df_condition_summary.iter_rows(named=True):
+            name = row["condition_name"]
+            if len(name) > max_name:
+                name = name[: max_name - 1] + "\u2026"
+            print(f"  {name:<{max_name}} | "
+                  f"{row['n_icd']:>{w_icd}} | "
+                  f"{row['n_snomed']:>{w_sno}} | "
+                  f"{row['n_overlaps']:>{w_ovl}}")
+        print(sep_line)
+
+        # Totals row (sum of per-condition unique counts)
+        t_conds = df_condition_summary.height
+        t_icd = df_condition_summary["n_icd"].sum()
+        t_sno = df_condition_summary["n_snomed"].sum()
+        t_ovl = df_condition_summary["n_overlaps"].sum()
+        print(f"  {'Total (' + str(t_conds) + ' conditions)':<{max_name}} | "
+              f"{t_icd:>{w_icd}} | "
+              f"{t_sno:>{w_sno}} | "
+              f"{t_ovl:>{w_ovl}}")
+        print(f"{'=' * 40}")
+
+        return {
+            "df_snomed": df_snomed,
+            "df_overlaps": df_overlaps,
+            "df_condition_summary": df_condition_summary,
+        }
+
+    # -------------------------------------------------------------------
+    # AI review of SNOMED overlap mappings
+    # -------------------------------------------------------------------
+
+    def review_snomed_overlaps(
+        self,
+        snomed_results: dict,
+        ai_tier: str = "flash",
+        ai_min_version: float = 3.0,
+        ai_passes: int = 2,
+        export_tsv: bool = False,
+        export_prefix: str = "snomed_mapping",
+    ) -> dict:
+        """AI review of SNOMED concepts shared by 2+ conditions.
+
+        For each (SNOMED concept, condition) pair in the overlap set,
+        asks Gemini whether the mapping is clinically valid or an artifact
+        of broad ICD coding.
+
+        Parameters
+        ----------
+        snomed_results : dict
+            Output of :meth:`icd_to_snomed` containing ``df_snomed``
+            and ``df_overlaps``.
+        ai_tier : str
+            Preferred Gemini model tier. Default "flash".
+        ai_min_version : float
+            Minimum Gemini model version. Default 3.0.
+        ai_passes : int
+            Number of independent AI passes. Default 2.
+        export_tsv : bool
+            Export results as TSV files. Default False.
+        export_prefix : str
+            Filename prefix for exported TSVs. Default "snomed_mapping".
+
+        Returns
+        -------
+        dict
+            Updated ``snomed_results`` with added keys:
+
+            - ``df_snomed`` — original + ``ai_overlap_verdict`` column
+            - ``df_overlaps`` — unchanged
+            - ``df_reviewed`` — per (snomed, condition) verdicts
+            - ``df_snomed_accepted`` — grouped by condition, AI rejects removed
+        """
+        model = self._resolve_model(
+            ai_tier=ai_tier, ai_min_version=ai_min_version,
+        )
+
+        df_snomed = snomed_results["df_snomed"]
+        df_overlaps = snomed_results["df_overlaps"]
+
+        if len(df_overlaps) == 0:
+            print("  No overlapping SNOMED concepts to review.")
+            snomed_results["df_snomed"] = df_snomed.with_columns(
+                pl.lit(None).cast(pl.Utf8).alias("ai_overlap_verdict")
+            )
+            snomed_results["df_reviewed"] = pl.DataFrame(schema={
+                "snomed_concept_id": pl.Int64, "snomed_code": pl.Utf8,
+                "snomed_name": pl.Utf8, "condition_name": pl.Utf8,
+                "icd_codes": pl.Utf8, "ai_verdict": pl.Utf8,
+                "ai_comment": pl.Utf8, "ai_vote": pl.Utf8,
+                "ai_vote_confidence": pl.Utf8,
+                "ai_comment_consistency": pl.Int64,
+                "ai_comment_consistency_tier": pl.Utf8,
+                "ai_combined_confidence": pl.Utf8,
+            })
+            # No overlaps — all SNOMED mappings accepted
+            df_snomed_full = snomed_results["df_snomed"]
+            snomed_results["df_snomed_accepted"] = (
+                df_snomed_full
+                .group_by("condition_name")
+                .agg(
+                    pl.col("snomed_concept_id").unique().sort()
+                        .cast(pl.Utf8).str.concat(", ")
+                        .alias("snomed_concept_ids"),
+                    pl.col("snomed_code").unique().sort()
+                        .str.concat(", ").alias("snomed_codes"),
+                    pl.col("snomed_name").unique().sort()
+                        .str.concat(", ").alias("snomed_names"),
+                    pl.col("snomed_concept_id").n_unique().alias("n_snomed"),
+                )
+                .sort("condition_name")
+            )
+            if export_tsv:
+                write_tsv_bom(
+                    df_snomed_full,
+                    f"{export_prefix}_snomed_full.tsv",
+                )
+                write_tsv_bom(
+                    snomed_results["df_snomed_accepted"],
+                    f"{export_prefix}_snomed_accepted.tsv",
+                )
+                print(f"\nExported:")
+                print(f"  {export_prefix}_snomed_full.tsv       "
+                      f"({len(df_snomed_full)} rows)")
+                print(f"  {export_prefix}_snomed_accepted.tsv   "
+                      f"({len(snomed_results['df_snomed_accepted'])} conditions)")
+            return snomed_results
+
+        # ── Step 1: Build review items ────────────────────────────────
+        # For each overlapping SNOMED concept, find which conditions
+        # map to it and which ICD codes led there.
+        overlap_ids = df_overlaps["snomed_concept_id"].to_list()
+
+        df_overlap_detail = (
+            df_snomed
+            .filter(pl.col("snomed_concept_id").is_in(overlap_ids))
+            .group_by("snomed_concept_id", "snomed_code", "snomed_name",
+                       "condition_name")
+            .agg(
+                pl.col("icd_code").unique().sort()
+                    .str.concat(", ").alias("icd_codes"),
+            )
+        )
+
+        review_items = []
+        for row in df_overlap_detail.iter_rows(named=True):
+            review_items.append({
+                "snomed_concept_id": row["snomed_concept_id"],
+                "snomed_code": row["snomed_code"],
+                "snomed_name": row["snomed_name"],
+                "condition_name": row["condition_name"],
+                "icd_codes": row["icd_codes"],
+            })
+
+        n_concepts = len(overlap_ids)
+        n_pairs = len(review_items)
+        print(f"\n  Overlapping SNOMED concepts: {n_concepts}")
+        print(f"  (concept, condition) pairs:  {n_pairs}")
+        print(f"  AI passes: {ai_passes}")
+        print(f"  Model: {model}")
+
+        # ── Step 2: Build prompts ─────────────────────────────────────
+        system_prompt = (
+            "You are a clinical terminologist reviewing SNOMED concept "
+            "overlaps in an OMOP cohort definition.\n\n"
+            "Each SNOMED concept below is mapped to 2+ conditions via ICD "
+            "code expansion. For each (snomed_concept, condition) pair, "
+            "decide:\n"
+            '- "keep" — the SNOMED concept is clinically relevant to this '
+            "condition\n"
+            '- "remove" — the mapping is an artifact of broad ICD coding; '
+            "this concept does not represent this condition\n"
+            '- "review" — uncertain, needs human review\n\n'
+            "Respond with a JSON array of verdicts. "
+            "Comment: 2-5 word clinical rationale."
+        )
+
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "verdicts": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "snomed_id": {"type": "STRING"},
+                            "condition": {"type": "STRING"},
+                            "v": {"type": "STRING",
+                                   "enum": ["keep", "remove", "review"]},
+                            "comment": {"type": "STRING"},
+                        },
+                        "required": ["snomed_id", "condition", "v", "comment"],
+                    },
+                },
+            },
+            "required": ["verdicts"],
+        }
+
+        # Group data prompt by SNOMED concept
+        grouped: dict[int, list[dict]] = {}
+        for item in review_items:
+            sid = item["snomed_concept_id"]
+            grouped.setdefault(sid, []).append(item)
+
+        data_lines = []
+        for sid, items in grouped.items():
+            first = items[0]
+            data_lines.append(
+                f'SNOMED {sid} "{first["snomed_name"]}" '
+                f"({first['snomed_code']})"
+            )
+            for it in items:
+                data_lines.append(
+                    f"  condition={it['condition_name']} "
+                    f"| icd_codes={it['icd_codes']}"
+                )
+            data_lines.append("")
+
+        data_prompt = "\n".join(data_lines)
+        full_prompt = f"{system_prompt}\n\n{data_prompt}"
+
+        # Show example
+        example_lines = data_lines[:8]
+        print(f"\n  Example prompt (first concepts):")
+        for line in example_lines:
+            print(f"    {line}")
+        if len(data_lines) > 8:
+            print(f"    ... ({len(data_lines)} total lines)")
+
+        # ── Step 3: Multi-pass voting ─────────────────────────────────
+        all_pass_results: list[list[dict]] = []
+
+        for pass_num in tqdm(range(1, ai_passes + 1),
+                             desc="  AI overlap review", unit="pass"):
+            for attempt in range(3):
+                try:
+                    raw = call_gemini(
+                        full_prompt,
+                        api_key=check_api_key(self._api_key),
+                        model=model,
+                        temperature=0.0 if pass_num == 1 else 0.2,
+                        response_schema=response_schema,
+                    )
+                    break
+                except RuntimeError as e:
+                    if "timed out" in str(e) and attempt < 2:
+                        tqdm.write(f"    Timeout, retrying ({attempt + 1}/2)...")
+                        continue
+                    raise
+
+            try:
+                parsed = json.loads(raw)
+                verdicts = parsed.get("verdicts", [])
+            except (json.JSONDecodeError, AttributeError):
+                print(f"    Warning: pass {pass_num} returned invalid JSON")
+                verdicts = []
+
+            print(f"    Received {len(verdicts)} verdicts")
+            all_pass_results.append(verdicts)
+
+        # ── Tally votes per (snomed_id, condition) key ────────────────
+        key_verdicts: dict[tuple, list[tuple[str, str]]] = {}
+        for pass_verdicts in all_pass_results:
+            for v in pass_verdicts:
+                # Match snomed_id back to int — AI returns string
+                try:
+                    sid = int(v["snomed_id"])
+                except (ValueError, KeyError):
+                    continue
+                cond = v.get("condition", "")
+                verdict = v.get("v", "review")
+                comment = v.get("comment", "")
+                key = (sid, cond)
+                key_verdicts.setdefault(key, []).append((verdict, comment))
+
+        vote_results: dict[tuple, dict] = {}
+        for key, vc_pairs in key_verdicts.items():
+            n_total = len(vc_pairs)
+            counts = {}
+            for verdict, _ in vc_pairs:
+                counts[verdict] = counts.get(verdict, 0) + 1
+
+            # Majority verdict
+            majority = max(counts, key=counts.get)
+            majority_count = counts[majority]
+
+            # For 2-pass: agreement = strong, disagreement = review/weak
+            if n_total >= 2 and majority_count == n_total:
+                confidence = "strong"
+            elif n_total >= 2 and majority_count > n_total / 2:
+                confidence = "moderate"
+            else:
+                # Disagreement — default to "review"
+                majority = "review"
+                confidence = "weak"
+
+            vote_str = f"{majority_count}/{n_total}"
+            majority_comments = [c for v, c in vc_pairs if v == majority]
+
+            vote_results[key] = {
+                "ai_verdict": majority,
+                "ai_vote": vote_str,
+                "ai_vote_confidence": confidence,
+                "comments": majority_comments,
+            }
+
+        # ── Step 4: Comment consistency + combined confidence ─────────
+        comment_results = self._compute_comment_consistency(vote_results)
+        combined_results = self._compute_combined_confidence(
+            vote_results, comment_results,
+        )
+
+        # ── Step 5: Build df_reviewed ─────────────────────────────────
+        # Build a lookup from review_items for snomed metadata
+        item_lookup = {
+            (it["snomed_concept_id"], it["condition_name"]): it
+            for it in review_items
+        }
+
+        reviewed_rows = []
+        for key, vr in vote_results.items():
+            sid, cond = key
+            meta = item_lookup.get(key, {})
+            cr = comment_results.get(key, {})
+            cc = combined_results.get(key, {})
+            reviewed_rows.append({
+                "snomed_concept_id": sid,
+                "snomed_code": meta.get("snomed_code", ""),
+                "snomed_name": meta.get("snomed_name", ""),
+                "condition_name": cond,
+                "icd_codes": meta.get("icd_codes", ""),
+                "ai_verdict": vr["ai_verdict"],
+                "ai_comment": cr.get("ai_comment", ""),
+                "ai_vote": vr["ai_vote"],
+                "ai_vote_confidence": vr["ai_vote_confidence"],
+                "ai_comment_consistency": cr.get("ai_comment_consistency", 0),
+                "ai_comment_consistency_tier": cr.get(
+                    "ai_comment_consistency_tier", "low"
+                ),
+                "ai_combined_confidence": cc.get(
+                    "ai_combined_confidence", "inconclusive"
+                ),
+            })
+
+        df_reviewed = pl.DataFrame(reviewed_rows, schema={
+            "snomed_concept_id": pl.Int64,
+            "snomed_code": pl.Utf8,
+            "snomed_name": pl.Utf8,
+            "condition_name": pl.Utf8,
+            "icd_codes": pl.Utf8,
+            "ai_verdict": pl.Utf8,
+            "ai_comment": pl.Utf8,
+            "ai_vote": pl.Utf8,
+            "ai_vote_confidence": pl.Utf8,
+            "ai_comment_consistency": pl.Int64,
+            "ai_comment_consistency_tier": pl.Utf8,
+            "ai_combined_confidence": pl.Utf8,
+        })
+
+        # Update df_snomed — left-join ai_overlap_verdict
+        df_verdict_join = df_reviewed.select(
+            "snomed_concept_id", "condition_name", "ai_verdict",
+        ).rename({"ai_verdict": "ai_overlap_verdict"})
+
+        df_snomed = df_snomed.join(
+            df_verdict_join,
+            on=["snomed_concept_id", "condition_name"],
+            how="left",
+        )
+
+        snomed_results["df_snomed"] = df_snomed
+        snomed_results["df_reviewed"] = df_reviewed
+
+        # ── Step 6: Print summary ─────────────────────────────────────
+        n_keep = len(df_reviewed.filter(pl.col("ai_verdict") == "keep"))
+        n_remove = len(df_reviewed.filter(pl.col("ai_verdict") == "remove"))
+        n_review = len(df_reviewed.filter(pl.col("ai_verdict") == "review"))
+        n_strong = len(df_reviewed.filter(
+            pl.col("ai_vote_confidence") == "strong"
+        ))
+        n_weak = len(df_reviewed.filter(
+            pl.col("ai_vote_confidence") != "strong"
+        ))
+
+        print(f"\n{'=' * 40}")
+        print(f"  SNOMED OVERLAP AI REVIEW")
+        print(f"{'=' * 40}")
+        print(f"  Model:                {model}")
+        print(f"  Overlapping concepts: {n_concepts}")
+        print(f"  Pairs reviewed:       {len(df_reviewed)}")
+        print(f"    keep:               {n_keep}")
+        print(f"    remove:             {n_remove}")
+        print(f"    review:             {n_review}")
+        print(f"  Confidence: strong={n_strong}, weak={n_weak}")
+        print(f"{'=' * 40}")
+
+        # ── Build df_snomed_accepted (grouped by condition) ───────────
+        # Remove rows where AI said "remove"; keep everything else
+        # (keep, review, and null = non-overlapping)
+        df_snomed_clean = df_snomed.filter(
+            pl.col("ai_overlap_verdict").is_null()
+            | (pl.col("ai_overlap_verdict") != "remove")
+        )
+
+        df_snomed_accepted = (
+            df_snomed_clean
+            .group_by("condition_name")
+            .agg(
+                pl.col("snomed_concept_id").unique().sort()
+                    .cast(pl.Utf8).str.concat(", ")
+                    .alias("snomed_concept_ids"),
+                pl.col("snomed_code").unique().sort()
+                    .str.concat(", ").alias("snomed_codes"),
+                pl.col("snomed_name").unique().sort()
+                    .str.concat(", ").alias("snomed_names"),
+                pl.col("snomed_concept_id").n_unique().alias("n_snomed"),
+            )
+            .sort("condition_name")
+        )
+
+        snomed_results["df_snomed_accepted"] = df_snomed_accepted
+
+        # ── Export ────────────────────────────────────────────────────
+        if export_tsv:
+            write_tsv_bom(df_snomed, f"{export_prefix}_snomed_full.tsv")
+            write_tsv_bom(
+                df_snomed_accepted,
+                f"{export_prefix}_snomed_accepted.tsv",
+            )
+            write_tsv_bom(df_reviewed, f"{export_prefix}_snomed_reviewed.tsv")
+            print(f"\nExported:")
+            print(f"  {export_prefix}_snomed_full.tsv       "
+                  f"({len(df_snomed)} rows)")
+            print(f"  {export_prefix}_snomed_accepted.tsv   "
+                  f"({len(df_snomed_accepted)} conditions)")
+            print(f"  {export_prefix}_snomed_reviewed.tsv   "
+                  f"({len(df_reviewed)} overlap pairs)")
+
+        return snomed_results

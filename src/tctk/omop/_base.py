@@ -342,7 +342,9 @@ class ConditionMapperBase:
             TRIM(REGEXP_REPLACE(REGEXP_REPLACE(LOWER(TRIM(processed_term)), '-', ' ', 'g'), '\s+', ' ', 'g')) AS synonym_lower
         FROM all_raw_terms,
             UNNEST([raw_term,
-                    REGEXP_REPLACE(raw_term, '\\s*\\([^)]*\\)', '', 'g')
+                    REGEXP_REPLACE(raw_term, '\\s*\\([^)]*\\)', '', 'g'),
+                    REGEXP_REPLACE(raw_term, '\\s*\\[[^\\]]*\\]', '', 'g'),
+                    REGEXP_REPLACE(REGEXP_REPLACE(raw_term, '\\s*\\([^)]*\\)', '', 'g'), '\\s*\\[[^\\]]*\\]', '', 'g')
             ]) AS t(processed_term)
         WHERE processed_term IS NOT NULL
           AND TRIM(processed_term) != ''
@@ -470,7 +472,7 @@ class ConditionMapperBase:
                     {
                         "condition_name": row["condition_name"],
                         "search_term": term,
-                        "matched_concept_synonym": candidate_synonyms[idx],
+                        "matched_concept_synonym": candidate_stripped[idx],
                         "concept_id": str(cand["concept_id"]),
                         "concept_code": cand["concept_code"],
                         "concept_name": cand["concept_name"],
@@ -1002,6 +1004,17 @@ class ConditionMapperBase:
             ai_min_version=ai_min_version,
             config_path=config_path,
         )
+
+        # Clear any zombie cached sessions
+        from google import genai
+        client = genai.Client(api_key=self._api_key)
+        zombie_count = 0
+        for cache in client.caches.list():
+            client.caches.delete(name=cache.name)
+            zombie_count += 1
+        if zombie_count:
+            print(f"  Cleared {zombie_count} zombie cached session(s)")
+
         df_matches = results["df_matches"].clone()
 
         # All fuzzy matches with a target concept

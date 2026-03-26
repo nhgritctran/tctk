@@ -21,6 +21,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from tctk._utils import strip_accents
+
 __all__ = ["CDCIndex9", "get_cdc_icd9_index"]
 
 # ---------------------------------------------------------------------------
@@ -196,6 +198,8 @@ class CDCIndex9:
 
         self._parse()
         self._resolve_see_refs()
+        self._build_tokensort_index()
+        self._build_code_names()
 
     # -------------------------------------------------------------------
     # Default normalizer (identical to CDCIndex._default_normalize)
@@ -203,13 +207,20 @@ class CDCIndex9:
 
     @staticmethod
     def _default_normalize(text: str) -> str:
-        """Normalize text: lowercase, hyphens→spaces, strip possessives ('s),
-        strip parentheticals, collapse whitespace."""
-        t = text.lower()
+        """Normalize text: strip accents, lowercase, hyphens→spaces,
+        strip possessives ('s), strip parentheticals/brackets,
+        strip punctuation, collapse whitespace."""
+        t = strip_accents(text)
+        t = t.lower()
         t = t.replace("-", " ")
         t = re.sub(r"'s\b", "", t)
         t = re.sub(r"\s*\([^)]*\)", "", t)
         t = t.replace(")", "")  # strip stray ) from nested parens
+        t = re.sub(r"\s*\[[^\]]*\]", "", t)      # strip []
+        t = t.replace("[", "")                   # strip stray [
+        t = t.replace("]", "")                   # strip stray ]
+        for ch in ',:;"/':
+            t = t.replace(ch, " ")
         t = re.sub(r"\s+", " ", t)
         return t.strip()
 
@@ -219,7 +230,7 @@ class CDCIndex9:
 
     # Regex to match an ICD-9-CM code at the end of a line
     # e.g. "Diabetes mellitus 250.0" or "  with coma 250.30"
-    _CODE_RE = re.compile(r"\b(\d{3}(?:\.\d{1,2})?)\s*$")
+    _CODE_RE = re.compile(r"\b(\d{3}(?:\.\d{1,2})?)\s*(?:\[\d{3}(?:\.\d{1,2})?\])?\s*$")
 
     # Regex to detect "Note" instructional headers (not clinical terms).
     # Matches "Note " and "N ote" (RTF may break the word).
@@ -430,6 +441,70 @@ class CDCIndex9:
                     self._code_lookup[norm_title] = list(codes)
 
     # -------------------------------------------------------------------
+    # Code → names index (for full-name lookup)
+    # -------------------------------------------------------------------
+
+    def _build_code_names(self) -> None:
+        """Build code → list of original names for full-name lookup."""
+        self._code_to_names: dict[str, list[str]] = {}
+        for entries in self._code_lookup.values():
+            for code, name in entries:
+                self._code_to_names.setdefault(code, []).append(name)
+
+    def _best_cdc_name(self, code: str, search_term: str) -> str:
+        """Find the most descriptive CDC name for *code* relevant to *search_term*.
+
+        Picks the name with the highest token overlap with the search term,
+        breaking ties by length (longer = more descriptive).
+        """
+        candidates = self._code_to_names.get(code, [])
+        if not candidates:
+            return search_term
+        if len(candidates) == 1:
+            return candidates[0]
+        search_tokens = set(self._default_normalize(search_term).split())
+        best = candidates[0]
+        best_score = (-1, 0)
+        for name in candidates:
+            name_tokens = set(self._default_normalize(name).split())
+            overlap = len(search_tokens & name_tokens)
+            score = (overlap, len(name))
+            if score > best_score:
+                best_score = score
+                best = name
+        return best
+
+    # -------------------------------------------------------------------
+    # Token-sort index (word-order-invariant lookup)
+    # -------------------------------------------------------------------
+
+    def _build_tokensort_index(self) -> None:
+        """Build token-sorted lookup and collision index.
+
+        For each normalized key in ``_code_lookup``, computes a canonical
+        form by sorting tokens alphabetically.  Keys whose sorted form
+        maps to different code sets are marked as *collisions* — these
+        require AI disambiguation at lookup time (returned as score=99).
+        """
+        sorted_to_originals: dict[str, list[str]] = {}
+        for key in self._code_lookup:
+            sorted_key = " ".join(sorted(key.split()))
+            sorted_to_originals.setdefault(sorted_key, []).append(key)
+
+        self._tokensort_lookup = sorted_to_originals
+
+        # Collision = sorted_key maps to original keys with different code sets
+        self._tokensort_collisions: set[str] = set()
+        for sorted_key, orig_keys in sorted_to_originals.items():
+            if len(orig_keys) > 1:
+                code_sets = [
+                    frozenset(c for c, _ in self._code_lookup[k])
+                    for k in orig_keys
+                ]
+                if len(set(code_sets)) > 1:
+                    self._tokensort_collisions.add(sorted_key)
+
+    # -------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------
 
@@ -454,8 +529,28 @@ class CDCIndex9:
         """
         fn = normalize_fn or self._default_normalize_fn
         norm = fn(term)
-        entries = self._code_lookup.get(norm, [])
-        return [{"code": code, "name": name} for code, name in entries]
+        entries = self._code_lookup.get(norm)
+        if entries:
+            return [{"code": c, "name": norm, "matched_query": norm,
+                     "cdc_name": self._best_cdc_name(c, term)}
+                    for c, n in entries]
+
+        # Token-sorted fallback (non-collision only)
+        sorted_norm = " ".join(sorted(norm.split()))
+        ts_originals = self._tokensort_lookup.get(sorted_norm)
+        if ts_originals and sorted_norm not in self._tokensort_collisions:
+            results = []
+            seen: set[str] = set()
+            for orig_key in ts_originals:
+                for c, n in self._code_lookup[orig_key]:
+                    if c not in seen:
+                        results.append({"code": c, "name": orig_key,
+                                        "matched_query": norm,
+                                        "cdc_name": self._best_cdc_name(c, term)})
+                        seen.add(c)
+            return results
+
+        return []
 
     @staticmethod
     def _strip_stopwords(text: str, stopwords: set[str]) -> str:
@@ -513,7 +608,28 @@ class CDCIndex9:
         # Exact match first — return immediately if found
         exact = self._code_lookup.get(norm)
         if exact:
-            return [{"code": c, "name": n, "score": 100} for c, n in exact]
+            return [{"code": c, "name": norm, "matched_query": norm,
+                     "cdc_name": self._best_cdc_name(c, term), "score": 100}
+                    for c, n in exact]
+
+        # Token-sorted exact match (catches word-order variants)
+        # Collect as exact hits, then continue to fuzzy for additional matches.
+        ts_results: list[dict] = []
+        ts_seen: set[str] = set()
+        sorted_norm = " ".join(sorted(norm.split()))
+        ts_originals = self._tokensort_lookup.get(sorted_norm)
+        if ts_originals:
+            is_collision = sorted_norm in self._tokensort_collisions
+            ts_score = 99 if is_collision else 100
+            for orig_key in ts_originals:
+                for c, n in self._code_lookup[orig_key]:
+                    if c not in ts_seen:
+                        ts_results.append({
+                            "code": c, "name": orig_key,
+                            "matched_query": norm,
+                            "cdc_name": self._best_cdc_name(c, term),
+                            "score": ts_score})
+                        ts_seen.add(c)
 
         # Build candidate list on first call (cached per stopword set)
         cache_key = frozenset(sw) if sw else frozenset()
@@ -542,7 +658,7 @@ class CDCIndex9:
             indices = list(range(len(candidates_stripped)))
 
         if not indices:
-            return []
+            return ts_results
 
         filtered_stripped = [candidates_stripped[i] for i in indices]
 
@@ -554,12 +670,18 @@ class CDCIndex9:
             score_cutoff=threshold,
         )
 
-        results = []
+        results = list(ts_results)
         for _, score, match_idx in matches:
             original_idx = indices[match_idx]
             original_key = keys[original_idx]
+            stripped_key = candidates_stripped[original_idx]
             for code, name in self._code_lookup[original_key]:
-                results.append({"code": code, "name": name, "score": int(score)})
+                if code not in ts_seen:
+                    results.append({
+                        "code": code, "name": stripped_key,
+                        "matched_query": norm_stripped,
+                        "cdc_name": self._best_cdc_name(code, term),
+                        "score": int(score)})
         return results
 
     @property

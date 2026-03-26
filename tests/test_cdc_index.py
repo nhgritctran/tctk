@@ -71,6 +71,22 @@ class TestICD10KeyQuality:
         bad = [k for k in icd10.keys if not k.strip()]
         assert bad == [], f"Whitespace-only keys found: {len(bad)}"
 
+    def test_no_square_brackets(self, icd10):
+        """Square brackets (synonyms/abbreviations) should be stripped."""
+        bad = [k for k in icd10.keys if "[" in k or "]" in k]
+        assert bad == [], (
+            f"{len(bad)} keys contain square brackets. "
+            f"First 10: {bad[:10]}"
+        )
+
+    def test_no_commas(self, icd10):
+        """Commas should be stripped from keys."""
+        bad = [k for k in icd10.keys if "," in k]
+        assert bad == [], (
+            f"{len(bad)} keys contain commas. "
+            f"First 10: {bad[:10]}"
+        )
+
     def test_reasonable_key_count(self, icd10):
         """Sanity: should have 50K-100K keys."""
         n = len(icd10.keys)
@@ -171,7 +187,7 @@ class TestICD10HierarchicalNames:
         'Rheumatoid, carditis' and should store 'Rheumatoid carditis'
         (from the target), not just 'carditis' (leaf only).
         """
-        key = "arthritis, arthritic rheumatoid with carditis"
+        key = "arthritis arthritic rheumatoid with carditis"
         entries = icd10._code_lookup.get(key, [])
         assert entries, f"Expected key '{key}' to exist"
         for code, name in entries:
@@ -282,6 +298,22 @@ class TestICD9KeyQuality:
     def test_no_empty_keys(self, icd9):
         assert "" not in icd9._code_lookup
 
+    def test_no_square_brackets(self, icd9):
+        """Square brackets (manifestation codes, abbreviations) should be stripped."""
+        bad = [k for k in icd9.keys if "[" in k or "]" in k]
+        assert bad == [], (
+            f"{len(bad)} keys contain square brackets. "
+            f"First 10: {bad[:10]}"
+        )
+
+    def test_no_commas(self, icd9):
+        """Commas should be stripped from keys."""
+        bad = [k for k in icd9.keys if "," in k]
+        assert bad == [], (
+            f"{len(bad)} keys contain commas. "
+            f"First 10: {bad[:10]}"
+        )
+
     def test_reasonable_key_count(self, icd9):
         n = len(icd9.keys)
         assert 40_000 < n < 80_000, f"Unexpected key count: {n}"
@@ -356,6 +388,24 @@ class TestICD9KnownGoodLookups:
         results = icd9.fuzzy_lookup("rheumatoid arthritis", threshold=70)
         assert len(results) > 0, "fuzzy_lookup should return results"
 
+    def test_manifestation_code_parsed(self, icd9):
+        """Lines with [manifestation_code] suffixes should be indexed.
+
+        E.g. "015.0 [730.88]" — the regex should capture 015.0 as primary.
+        Verify by checking that Tuberculosis-related codes with manifestation
+        patterns are present (e.g. code 015.0 for Tuberculosis of bones).
+        """
+        # 015.0 = Tuberculosis of vertebral column; appears with [730.88]
+        codes_in_index = {
+            code
+            for entries in icd9._code_lookup.values()
+            for code, _ in entries
+        }
+        assert "015.0" in codes_in_index, (
+            "Code 015.0 (Tuberculosis of vertebral column) should be indexed — "
+            "it appears with a [730.88] manifestation code suffix"
+        )
+
 
 # ===================================================================
 # Cross-parser consistency
@@ -393,3 +443,131 @@ class TestNormalizerConsistency:
 
     def test_hyphens_to_spaces(self):
         assert CDCIndex._default_normalize("post-COVID-19") == "post covid 19"
+
+    def test_accents_stripped(self):
+        """Accented characters should be normalized to ASCII equivalents."""
+        assert CDCIndex._default_normalize("Behçet's syndrome") == "behcet syndrome"
+        assert CDCIndex._default_normalize("Sjögren's") == "sjogren"
+        assert CDCIndex._default_normalize("Henoch-Schönlein") == "henoch schonlein"
+
+    def test_commas_stripped(self):
+        """Commas (used for alternate forms) should be replaced with spaces."""
+        assert CDCIndex._default_normalize("Disease, diseased") == "disease diseased"
+        assert CDCIndex._default_normalize("Arthritis, arthritic") == "arthritis arthritic"
+
+    def test_special_punctuation_stripped(self):
+        """Colons, semicolons, quotes, slashes should be replaced with spaces."""
+        assert ":" not in CDCIndex._default_normalize("BI-RADS: category 4")
+        assert ";" not in CDCIndex._default_normalize("moans; restless")
+        assert "/" not in CDCIndex._default_normalize("genetic/familial")
+
+    def test_square_brackets_stripped(self):
+        """Square brackets (synonyms/abbreviations) should be stripped."""
+        result = CDCIndex._default_normalize(
+            "Systemic sclerosis [scleroderma]"
+        )
+        assert "[" not in result
+        assert "]" not in result
+        assert result == "systemic sclerosis"
+
+    def test_square_brackets_multiple(self):
+        """Multiple bracket groups should all be stripped."""
+        result = CDCIndex._default_normalize(
+            "electrocardiogram [ECG] [EKG]"
+        )
+        assert "[" not in result
+        assert "]" not in result
+        assert result == "electrocardiogram"
+
+
+# ===================================================================
+# Token-sort index
+# ===================================================================
+
+class TestICD10TokenSort:
+    """Token-sort index should catch word-order variants."""
+
+    def test_tokensort_index_built(self, icd10):
+        assert hasattr(icd10, "_tokensort_lookup")
+        assert hasattr(icd10, "_tokensort_collisions")
+        assert len(icd10._tokensort_lookup) > 0
+
+    def test_collision_count_reasonable(self, icd10):
+        n = len(icd10._tokensort_collisions)
+        assert n < 500, f"Too many collisions: {n}"
+
+    def test_reversed_term_exact_via_lookup(self, icd10):
+        """A 2-word reversed term should match via lookup() if non-collision."""
+        # Find a 2-word key to test with
+        for key in icd10._code_lookup:
+            words = key.split()
+            if len(words) == 2:
+                reversed_key = f"{words[1]} {words[0]}"
+                if reversed_key not in icd10._code_lookup:
+                    sorted_key = " ".join(sorted(words))
+                    if sorted_key not in icd10._tokensort_collisions:
+                        results = icd10.lookup(reversed_key)
+                        assert len(results) > 0, (
+                            f"lookup('{reversed_key}') should find "
+                            f"'{key}' via token-sort"
+                        )
+                        return
+        pytest.skip("No suitable 2-word non-collision key found")
+
+    def test_fuzzy_reversed_term_score_100(self, icd10):
+        """Non-collision token-sort match via fuzzy_lookup() should score 100."""
+        for key in icd10._code_lookup:
+            words = key.split()
+            if len(words) == 2:
+                reversed_key = f"{words[1]} {words[0]}"
+                if reversed_key not in icd10._code_lookup:
+                    sorted_key = " ".join(sorted(words))
+                    if sorted_key not in icd10._tokensort_collisions:
+                        results = icd10.fuzzy_lookup(reversed_key, threshold=70)
+                        assert len(results) > 0
+                        assert results[0]["score"] == 100
+                        return
+        pytest.skip("No suitable 2-word non-collision key found")
+
+    def test_collision_fuzzy_score_99(self, icd10):
+        """Collision token-sort match via fuzzy_lookup() should score 99."""
+        if not icd10._tokensort_collisions:
+            pytest.skip("No collisions in ICD-10 index")
+        sorted_key = next(iter(icd10._tokensort_collisions))
+        # Query with a term that sorts to this collision key
+        results = icd10.fuzzy_lookup(sorted_key, threshold=70)
+        # If the sorted_key itself is in _code_lookup, exact match fires first
+        if sorted_key in icd10._code_lookup:
+            assert results[0]["score"] == 100
+        else:
+            assert any(r["score"] == 99 for r in results)
+
+
+class TestICD9TokenSort:
+    """Token-sort index should catch word-order variants for ICD-9."""
+
+    def test_tokensort_index_built(self, icd9):
+        assert hasattr(icd9, "_tokensort_lookup")
+        assert hasattr(icd9, "_tokensort_collisions")
+        assert len(icd9._tokensort_lookup) > 0
+
+    def test_collision_count_reasonable(self, icd9):
+        n = len(icd9._tokensort_collisions)
+        assert n < 500, f"Too many collisions: {n}"
+
+    def test_reversed_term_exact_via_lookup(self, icd9):
+        """A 2-word reversed term should match via lookup() if non-collision."""
+        for key in icd9._code_lookup:
+            words = key.split()
+            if len(words) == 2:
+                reversed_key = f"{words[1]} {words[0]}"
+                if reversed_key not in icd9._code_lookup:
+                    sorted_key = " ".join(sorted(words))
+                    if sorted_key not in icd9._tokensort_collisions:
+                        results = icd9.lookup(reversed_key)
+                        assert len(results) > 0, (
+                            f"lookup('{reversed_key}') should find "
+                            f"'{key}' via token-sort"
+                        )
+                        return
+        pytest.skip("No suitable 2-word non-collision key found")
