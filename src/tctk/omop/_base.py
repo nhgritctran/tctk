@@ -13,6 +13,7 @@ subclasses (e.g. Condition2SNOMED, Condition2ICD):
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -25,8 +26,10 @@ from tctk._utils import (
     sql_escape,
     strip_accents,
     load_api_key,
+    load_anthropic_api_key,
     check_api_key,
     call_gemini,
+    call_claude,
     setup_credentials,
     detect_best_model,
     create_gemini_cache,
@@ -54,6 +57,13 @@ class ConditionMapperBase:
     """
 
     BATCH_SIZE = 500
+
+    # Claude model map (fixed names — no API call needed)
+    _CLAUDE_MODELS = {
+        "opus":   "claude-opus-4-6",
+        "sonnet": "claude-sonnet-4-6",
+        "haiku":  "claude-haiku-4-5-20251001",
+    }
 
     # Subclasses must define these for vocabulary-specific AI review
     _TARGET_ID_COL: str    # e.g. "snomed_concept_id" or "icd_concept_id"
@@ -86,6 +96,8 @@ class ConditionMapperBase:
         self._api_key: Optional[str] = None
         self._ai_tier: Optional[str] = None
         self._ai_model: Optional[str] = None
+        self._claude_api_key: Optional[str] = None
+        self._claude_model: Optional[str] = None
 
     # -------------------------------------------------------------------
     # DuckDB query helper
@@ -104,16 +116,28 @@ class ConditionMapperBase:
     # Credential / model management
     # -------------------------------------------------------------------
 
-    def set_api_key(self, key: Optional[str] = None, key_file: Optional[str] = None) -> None:
-        """Set Gemini API key for AI review.
+    def set_api_key(
+        self,
+        key: Optional[str] = None,
+        key_file: Optional[str] = None,
+        claude_key: Optional[str] = None,
+        claude_key_file: Optional[str] = None,
+    ) -> None:
+        """Set API keys for AI review.
 
         Parameters
         ----------
         key : str, optional
-            API key string directly.
+            Gemini API key string directly.
         key_file : str, optional
-            Path to a JSON file containing {"gemini_api_key": "your-key"}.
+            Path to a JSON file containing ``{"gemini_api_key": "..."}``.
+            May also contain ``{"anthropic_api_key": "..."}`` for Claude.
+        claude_key : str, optional
+            Claude (Anthropic) API key string directly.
+        claude_key_file : str, optional
+            Path to a JSON file containing ``{"anthropic_api_key": "..."}``.
         """
+        # --- Gemini key ---
         if key:
             self._api_key = key
         elif key_file:
@@ -124,9 +148,27 @@ class ConditionMapperBase:
                     f"Key file {key_file} missing 'gemini_api_key' field.\n"
                     'Expected format: {"gemini_api_key": "your-key-here"}'
                 )
-        else:
-            raise ValueError("Provide either key or key_file.")
+        elif not claude_key and not claude_key_file:
+            raise ValueError(
+                "Provide at least one API key:\n"
+                "  Gemini: key=... or key_file=...\n"
+                "  Claude: claude_key=... or claude_key_file=..."
+            )
         self._ai_model = None
+
+        # --- Claude key (optional) ---
+        if claude_key:
+            self._claude_api_key = claude_key
+        elif claude_key_file:
+            claude_config = json.loads(Path(claude_key_file).read_text())
+            self._claude_api_key = claude_config.get("anthropic_api_key")
+        elif key_file:
+            # Also check the Gemini key file for anthropic_api_key
+            gemini_config = json.loads(Path(key_file).read_text())
+            claude_key_found = gemini_config.get("anthropic_api_key")
+            if claude_key_found:
+                self._claude_api_key = claude_key_found
+        self._claude_model = None
 
     @staticmethod
     def setup_credentials(path: Optional[str] = None) -> None:
@@ -139,52 +181,132 @@ class ConditionMapperBase:
         """
         setup_credentials(path)
 
+    def _resolve_claude_model(
+        self,
+        ai_tier: Optional[str] = None,
+        ai_min_version: Optional[float] = None,
+    ) -> Optional[str]:
+        """Select a Claude model by tier and minimum version.
+
+        Returns None if no Claude API key is set.
+        """
+        if not self._claude_api_key:
+            return None
+
+        tier = (ai_tier or "sonnet").lower().strip()
+        min_ver = ai_min_version if ai_min_version is not None else 4.6
+
+        # Filter by min_version  (model names use hyphens: claude-opus-4-6)
+        candidates = {}
+        for t, m in self._CLAUDE_MODELS.items():
+            match = re.search(r"(\d+)[.-](\d+)", m)
+            ver = float(f"{match.group(1)}.{match.group(2)}") if match else 0.0
+            if ver >= min_ver:
+                candidates[t] = (m, ver)
+
+        if not candidates:
+            available = ", ".join(
+                f"{t} ({m})" for t, m in self._CLAUDE_MODELS.items()
+            )
+            raise RuntimeError(
+                f"No Claude models >= {min_ver}. Available: {available}"
+            )
+
+        if tier in candidates:
+            model = candidates[tier][0]
+        else:
+            # Pick best available tier
+            model = max(candidates.values(), key=lambda x: x[1])[0]
+            print(
+                f"  Warning: Claude tier '{tier}' not available >= {min_ver}. "
+                f"Using {model}."
+            )
+
+        if self._claude_model != model:
+            self._claude_model = model
+            print(f"  Claude model selected: {model}")
+        return model
+
+    def _has_provider(self, provider: str) -> bool:
+        """Check if an API key is configured for the given provider."""
+        if provider == "claude":
+            return self._claude_api_key is not None
+        elif provider == "gemini":
+            return self._api_key is not None
+        return False
+
     def _resolve_model(
         self,
+        ai_provider: str = "gemini",
         gemini_api_key: Optional[str] = None,
         ai_tier: Optional[str] = None,
-        ai_min_version: float = 3.0,
+        ai_min_version: Optional[float] = None,
         config_path: Optional[str] = None,
-    ) -> str:
-        """Detect and cache the best Gemini model for the API key and tier.
+    ) -> tuple:
+        """Detect and cache the best model for the given provider.
 
         Parameters
         ----------
+        ai_provider : str
+            ``"gemini"`` or ``"claude"``. Default ``"gemini"``.
         gemini_api_key : str, optional
-            Explicit API key (highest priority).
+            Explicit Gemini API key (highest priority).
         ai_tier : str, optional
-            Model tier: "pro", "flash", or "flash-lite". Default "flash".
-        ai_min_version : float
-            Minimum model version. Default 3.0 (prefer Gemini 3.x+).
-            Set to 2.5 to allow older models.
+            Model tier. For Gemini: "pro", "flash", "flash-lite" (default "pro").
+            For Claude: "opus", "sonnet", "haiku" (default "sonnet").
+        ai_min_version : float, optional
+            Minimum model version. Gemini default 3.0, Claude default 4.6.
         config_path : str, optional
             Path to JSON config file for API key.
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(provider, model)`` — e.g. ``("gemini", "gemini-3.0-pro")`` or
+            ``("claude", "claude-sonnet-4-6")``.
         """
+        if ai_provider == "claude":
+            tier = ai_tier or "sonnet"
+            min_ver = ai_min_version if ai_min_version is not None else 4.6
+            model = self._resolve_claude_model(
+                ai_tier=tier, ai_min_version=min_ver,
+            )
+            if model is None:
+                raise ValueError(
+                    "Claude API key not set.\n"
+                    "Use set_api_key(claude_key=...) or "
+                    "set_api_key(claude_key_file=...)"
+                )
+            return ("claude", model)
+
+        # --- Gemini ---
+        tier = ai_tier or self._ai_tier or "pro"
+        min_ver = ai_min_version if ai_min_version is not None else 3.0
+
         api_key = (
             gemini_api_key
             or self._api_key
             or load_api_key(config_path=config_path)
         )
         api_key = check_api_key(api_key)
-        tier = ai_tier or self._ai_tier or "flash"
 
         # Reuse cached model if key, tier, and min_version haven't changed
         if (
             self._ai_model is not None
             and self._api_key == api_key
             and self._ai_tier == tier
-            and getattr(self, "_ai_min_version", None) == ai_min_version
+            and getattr(self, "_ai_min_version", None) == min_ver
         ):
-            return self._ai_model
+            return ("gemini", self._ai_model)
 
         self._api_key = api_key
         self._ai_tier = tier
-        self._ai_min_version = ai_min_version
+        self._ai_min_version = min_ver
         self._ai_model = detect_best_model(
-            api_key, ai_tier=tier, min_version=ai_min_version
+            api_key, ai_tier=tier, min_version=min_ver,
         )
         print(f"  Gemini model selected: {self._ai_model}")
-        return self._ai_model
+        return ("gemini", self._ai_model)
 
     # -------------------------------------------------------------------
     # Step 1: Build normalized search terms from input dict
@@ -601,6 +723,96 @@ class ConditionMapperBase:
         }
 
     # -------------------------------------------------------------------
+    # AI dispatch helper
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_ai_json(response_text: str) -> dict:
+        """Parse a JSON response from an AI model.
+
+        Handles empty responses and Claude's tendency to wrap JSON in
+        markdown code fences (```json ... ```) despite instructions.
+        """
+        if not response_text or not response_text.strip():
+            raise RuntimeError("API returned empty response")
+
+        text = response_text.strip()
+
+        # Strip markdown code fences if present (Claude sometimes adds these)
+        fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fence_match:
+            text = fence_match.group(1)
+        else:
+            # Find the outermost JSON object if surrounded by extra text
+            obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if obj_match and not text.startswith("{"):
+                text = obj_match.group(0)
+
+        return json.loads(text)
+
+    def _call_ai(
+        self,
+        provider: str,
+        prompt: str,
+        model: str,
+        system_prompt: str = "",
+        response_schema: Optional[dict] = None,
+        temperature: float = 0.0,
+        max_output_tokens: int = 65536,
+        timeout: int = 300,
+        max_retries: int = 3,
+        cache_name: Optional[str] = None,
+    ) -> str:
+        """Dispatch an AI call to Gemini or Claude.
+
+        For Claude, the response schema is included in the system prompt
+        as JSON instructions (Claude doesn't support native schema enforcement).
+        """
+        if provider == "claude":
+            claude_system = system_prompt or ""
+            if response_schema:
+                claude_system += (
+                    "\n\nYou MUST respond with ONLY valid JSON (no markdown "
+                    "fences, no explanation) matching this schema:\n"
+                    + json.dumps(response_schema, indent=2)
+                )
+            return call_claude(
+                prompt=prompt,
+                api_key=self._claude_api_key,
+                model=model,
+                system_prompt=claude_system,
+                temperature=temperature,
+                max_output_tokens=min(max_output_tokens, 16384),
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        else:
+            # Gemini
+            if cache_name:
+                return call_gemini_cached(
+                    prompt, check_api_key(self._api_key), model,
+                    cache_name=cache_name,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    response_schema=response_schema,
+                )
+            else:
+                full_prompt = (
+                    (system_prompt + "\n" + prompt)
+                    if system_prompt else prompt
+                )
+                return call_gemini(
+                    full_prompt, check_api_key(self._api_key), model,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    response_schema=response_schema,
+                )
+
+    # -------------------------------------------------------------------
     # AI review: single-pass execution
     # -------------------------------------------------------------------
 
@@ -613,6 +825,7 @@ class ConditionMapperBase:
         model: str,
         pass_num: int,
         cache_name: Optional[str] = None,
+        provider: str = "gemini",
     ) -> list[dict]:
         """Run a single AI review pass over all batches.
 
@@ -660,31 +873,65 @@ class ConditionMapperBase:
 
             data_prompt = "\n".join(data_parts)
 
-            try:
-                if cache_name:
-                    response_text = call_gemini_cached(
-                        data_prompt, check_api_key(self._api_key), model,
-                        cache_name=cache_name,
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response_text = self._call_ai(
+                        provider, data_prompt, model,
+                        system_prompt=system_prompt,
                         response_schema=response_schema,
-                    )
-                else:
-                    full_prompt = system_prompt + "\n" + data_prompt
-                    response_text = call_gemini(
-                        full_prompt, check_api_key(self._api_key), model,
-                        response_schema=response_schema,
+                        cache_name=cache_name if provider == "gemini" else None,
                     )
 
-                parsed = json.loads(response_text.strip())
-                verdicts = parsed.get("verdicts", [])
-                for v in verdicts:
-                    row = self._ai_review_parse_verdict(v)
-                    # Fix search_term if Gemini stripped accents
-                    st = row["search_term"]
-                    if st not in original_terms:
-                        row["search_term"] = norm_to_original.get(strip_accents(st), st)
-                    all_verdicts.append(row)
-            except Exception as e:
-                print(f"  Pass {pass_num} error for batch: {e}")
+                    parsed = self._parse_ai_json(response_text)
+                    verdicts = parsed.get("verdicts", [])
+                    for v in verdicts:
+                        row = self._ai_review_parse_verdict(v)
+                        # Fix search_term if AI stripped accents
+                        st = row["search_term"]
+                        if st not in original_terms:
+                            row["search_term"] = norm_to_original.get(strip_accents(st), st)
+                        all_verdicts.append(row)
+                    break  # success
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        import time
+                        wait = 30 * (attempt + 1)
+                        print(f"  Pass {pass_num} batch error (attempt "
+                              f"{attempt + 1}/{max_retries}): {e}")
+                        print(f"    Retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        # Primary exhausted — try fallback provider
+                        fallback = "claude" if provider == "gemini" else "gemini"
+                        if self._has_provider(fallback):
+                            print(f"  {provider} failed, trying {fallback}...")
+                            try:
+                                _, fb_model = self._resolve_model(
+                                    ai_provider=fallback,
+                                )
+                                response_text = self._call_ai(
+                                    fallback, data_prompt, fb_model,
+                                    system_prompt=system_prompt,
+                                    response_schema=response_schema,
+                                )
+                                parsed = self._parse_ai_json(response_text)
+                                verdicts = parsed.get("verdicts", [])
+                                for v in verdicts:
+                                    row = self._ai_review_parse_verdict(v)
+                                    st = row["search_term"]
+                                    if st not in original_terms:
+                                        row["search_term"] = norm_to_original.get(
+                                            strip_accents(st), st,
+                                        )
+                                    all_verdicts.append(row)
+                            except Exception as fb_e:
+                                print(f"  {fallback} also failed: {fb_e}")
+                                print(f"  Pass {pass_num} batch FAILED after "
+                                      f"{max_retries} attempts + fallback")
+                        else:
+                            print(f"  Pass {pass_num} batch FAILED after "
+                                  f"{max_retries} attempts: {e}")
 
         return all_verdicts
 
@@ -961,17 +1208,22 @@ class ConditionMapperBase:
         results: dict,
         batch_size: Optional[int] = None,
         gemini_api_key: Optional[str] = None,
-        ai_tier: str = "flash",
-        ai_min_version: float = 3.0,
+        ai_provider: str = "gemini",
+        ai_tier: Optional[str] = None,
+        ai_min_version: Optional[float] = None,
         config_path: Optional[str] = None,
         ai_passes: int = 2,
     ) -> dict:
-        """AI-assisted review of fuzzy matches using Gemini API.
+        """AI-assisted review of fuzzy matches.
 
         Uses multi-pass adaptive replication: runs ``ai_passes`` initial
         passes on all fuzzy matches, then up to 5 total passes on
         disagreements. Vote confidence, comment consistency, and overall
         AI reliability are computed from the results.
+
+        Supports Gemini and Claude as AI providers with auto-fallback:
+        if all retries for a batch fail with the primary provider,
+        the other provider is tried if its key is configured.
 
         Parameters
         ----------
@@ -981,10 +1233,14 @@ class ConditionMapperBase:
             Conditions per API call. If None, auto-calculated.
         gemini_api_key : str, optional
             Gemini API key.
-        ai_tier : str
-            Preferred Gemini model tier. Default "flash".
-        ai_min_version : float
-            Minimum Gemini model version. Default 3.0.
+        ai_provider : str
+            Primary AI provider: ``"gemini"`` or ``"claude"``.
+            Default ``"gemini"``.
+        ai_tier : str, optional
+            Preferred model tier. Auto-resolves per provider if None:
+            Gemini → "pro", Claude → "sonnet".
+        ai_min_version : float, optional
+            Minimum model version. Gemini default 3.0, Claude default 4.6.
         config_path : str, optional
             Path to JSON config file for API key.
         ai_passes : int
@@ -998,22 +1254,24 @@ class ConditionMapperBase:
             ai_comment, ai_comment_consistency, ai_comment_consistency_tier,
             and ai_combined_confidence columns.
         """
-        model = self._resolve_model(
+        provider, model = self._resolve_model(
+            ai_provider=ai_provider,
             gemini_api_key=gemini_api_key,
             ai_tier=ai_tier,
             ai_min_version=ai_min_version,
             config_path=config_path,
         )
 
-        # Clear any zombie cached sessions
-        from google import genai
-        client = genai.Client(api_key=self._api_key)
-        zombie_count = 0
-        for cache in client.caches.list():
-            client.caches.delete(name=cache.name)
-            zombie_count += 1
-        if zombie_count:
-            print(f"  Cleared {zombie_count} zombie cached session(s)")
+        # Clear any zombie cached sessions (Gemini only)
+        if provider == "gemini":
+            from google import genai
+            client = genai.Client(api_key=self._api_key)
+            zombie_count = 0
+            for cache in client.caches.list():
+                client.caches.delete(name=cache.name)
+                zombie_count += 1
+            if zombie_count:
+                print(f"  Cleared {zombie_count} zombie cached session(s)")
 
         df_matches = results["df_matches"].clone()
 
@@ -1084,14 +1342,18 @@ class ConditionMapperBase:
             print(f"    {line}")
 
         # --- Create Gemini cache (only if prompt is large enough) ---
-        from tctk._utils import _GEMINI_CACHE_MIN_TOKENS
-        est_tokens = len(system_prompt) // 4
-        cache_name = create_gemini_cache(system_prompt, check_api_key(self._api_key), model)
-        if cache_name:
-            print(f"\n  Gemini cache created: {cache_name}")
-        else:
-            print(f"\n  System prompt ~{est_tokens} tokens, below Gemini cache minimum "
-                  f"({_GEMINI_CACHE_MIN_TOKENS:,} tokens). Falling back to full prompts.")
+        cache_name = None
+        if provider == "gemini":
+            from tctk._utils import _GEMINI_CACHE_MIN_TOKENS
+            est_tokens = len(system_prompt) // 4
+            cache_name = create_gemini_cache(
+                system_prompt, check_api_key(self._api_key), model,
+            )
+            if cache_name:
+                print(f"\n  Gemini cache created: {cache_name}")
+            else:
+                print(f"\n  System prompt ~{est_tokens} tokens, below Gemini cache minimum "
+                      f"({_GEMINI_CACHE_MIN_TOKENS:,} tokens). Falling back to full prompts.")
 
         calls_used = 0
 
@@ -1102,6 +1364,7 @@ class ConditionMapperBase:
                 pass1 = self._run_single_pass(
                     df_to_review, cond_batches, system_prompt,
                     response_schema, model, 1, cache_name,
+                    provider=provider,
                 )
                 calls_used += len(cond_batches)
 
@@ -1122,6 +1385,7 @@ class ConditionMapperBase:
                 pass1 = self._run_single_pass(
                     df_to_review, cond_batches, system_prompt,
                     response_schema, model, 1, cache_name,
+                    provider=provider,
                 )
                 calls_used += len(cond_batches)
 
@@ -1129,6 +1393,7 @@ class ConditionMapperBase:
                 pass2 = self._run_single_pass(
                     df_to_review, cond_batches, system_prompt,
                     response_schema, model, 2, cache_name,
+                    provider=provider,
                 )
                 calls_used += len(cond_batches)
 
@@ -1170,18 +1435,21 @@ class ConditionMapperBase:
                     pass3 = self._run_single_pass(
                         df_disagreements, disagree_batches, system_prompt,
                         response_schema, model, 3, cache_name,
+                        provider=provider,
                     )
                     calls_used += len(disagree_batches)
 
                     pass4 = self._run_single_pass(
                         df_disagreements, disagree_batches, system_prompt,
                         response_schema, model, 4, cache_name,
+                        provider=provider,
                     )
                     calls_used += len(disagree_batches)
 
                     pass5 = self._run_single_pass(
                         df_disagreements, disagree_batches, system_prompt,
                         response_schema, model, 5, cache_name,
+                        provider=provider,
                     )
                     calls_used += len(disagree_batches)
 
@@ -1229,7 +1497,7 @@ class ConditionMapperBase:
                     retry_verdicts = self._run_single_pass(
                         df_missing, missing_batches, system_prompt,
                         response_schema, model, f"retry-{retry_pass}",
-                        cache_name,
+                        cache_name, provider=provider,
                     )
                     calls_used += len(missing_batches)
 
@@ -1295,7 +1563,7 @@ class ConditionMapperBase:
 
         finally:
             # --- Clean up Gemini cache ---
-            if cache_name:
+            if cache_name and provider == "gemini":
                 delete_gemini_cache(cache_name, check_api_key(self._api_key))
                 print(f"  Gemini cache deleted")
 
@@ -1330,6 +1598,7 @@ class ConditionMapperBase:
         print(f"\n{'=' * 40}")
         print(f"  AI REVIEW SUMMARY")
         print(f"{'=' * 40}")
+        print(f"  Provider:          {provider}")
         print(f"  Model used:        {model}")
         print(f"  API calls used:    {calls_used}")
         print(f"  AI passes:         {ai_passes}")

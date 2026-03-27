@@ -138,6 +138,41 @@ def load_api_key(
     return None
 
 
+def load_anthropic_api_key(
+    api_key: Optional[str] = None,
+    config_path: Optional[str] = None,
+) -> Optional[str]:
+    """Load Anthropic (Claude) API key from config files.
+
+    Priority:
+        1. Explicit api_key parameter
+        2. Config file (explicit path, then default search paths)
+
+    No environment variables — keys are loaded from JSON config files only.
+
+    Parameters
+    ----------
+    api_key : str, optional
+        Directly provided API key.
+    config_path : str, optional
+        Path to config JSON file.
+
+    Returns
+    -------
+    str or None
+        API key if found, None otherwise.
+    """
+    if api_key:
+        return api_key
+
+    config = load_config(config_path)
+    key = config.get("anthropic_api_key")
+    if key:
+        return key
+
+    return None
+
+
 def check_api_key(api_key: Optional[str]) -> str:
     """Validate API key is available; raise ValueError with instructions if not.
 
@@ -407,15 +442,17 @@ def call_gemini(
     api_key : str
         Gemini API key.
     model : str
-        Full model name (e.g., "gemini-2.5-flash").
+        Full model name (e.g., "gemini-3.0-pro").
     temperature : float
         Sampling temperature. Default 0.0 (deterministic).
     max_output_tokens : int
-        Max tokens in response. Default 1024.
+        Max tokens in response. Default 65536.
     timeout : int
-        Request timeout in seconds. Default 30.
+        Request timeout in seconds. Default 300.
     max_retries : int
         Maximum retries on 429 rate limit errors. Default 3.
+    response_schema : dict, optional
+        JSON schema for structured output.
 
     Returns
     -------
@@ -502,6 +539,16 @@ def call_gemini(
             raise RuntimeError(
                 f"Unexpected Gemini API response format: {e}"
             ) from e
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                wait = 30 * (attempt + 1)
+                print(f"    Gemini timed out after {timeout}s")
+                print(f"    Retrying in {wait}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(
+                f"Gemini API timed out after {max_retries} retries"
+            )
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Gemini API request failed: {e}") from e
 
@@ -719,3 +766,132 @@ def delete_gemini_cache(cache_name: str, api_key: str) -> None:
         requests.delete(url, timeout=10)
     except Exception:
         pass
+
+
+# -------------------------------------------------------------------
+# Claude API call
+# -------------------------------------------------------------------
+
+def call_claude(
+    prompt: str,
+    api_key: str,
+    model: str = "claude-sonnet-4-6",
+    system_prompt: str = "",
+    temperature: float = 0.0,
+    max_output_tokens: int = 16384,
+    timeout: int = 300,
+    max_retries: int = 3,
+) -> str:
+    """Call Claude (Anthropic) API directly via REST with automatic retry.
+
+    Retries on HTTP 429 (rate limit), 529 (overloaded), and 5xx errors.
+
+    Parameters
+    ----------
+    prompt : str
+        The user prompt text.
+    api_key : str
+        Anthropic API key.
+    model : str
+        Model name. Default "claude-sonnet-4-6".
+    system_prompt : str
+        Optional system prompt.
+    temperature : float
+        Sampling temperature. Default 0.0 (deterministic).
+    max_output_tokens : int
+        Max tokens in response. Default 16384.
+    timeout : int
+        Request timeout in seconds. Default 300.
+    max_retries : int
+        Maximum retries on retryable errors. Default 3.
+
+    Returns
+    -------
+    str
+        Model response text.
+
+    Raises
+    ------
+    RuntimeError
+        If the API call fails after all retries.
+    """
+    import requests
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    payload = {
+        "model": model,
+        "max_tokens": max_output_tokens,
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system_prompt:
+        payload["system"] = system_prompt
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+
+            if resp.status_code in (429, 529, 503) and attempt < max_retries:
+                wait = 40
+                try:
+                    retry_after = resp.headers.get("retry-after")
+                    if retry_after:
+                        wait = int(retry_after) + 2
+                except Exception:
+                    pass
+                labels = {429: "Rate limited", 529: "Overloaded", 503: "Server overloaded"}
+                label = labels.get(resp.status_code, f"HTTP {resp.status_code}")
+                print(f"    {label} ({resp.status_code})")
+                print(f"    Waiting {wait}s (retry {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            stop_reason = data.get("stop_reason", "")
+            if stop_reason == "max_tokens":
+                raise RuntimeError(
+                    "Claude response truncated (max_tokens). "
+                    "Increase max_output_tokens or reduce batch_size."
+                )
+
+            parts = [
+                block["text"]
+                for block in data.get("content", [])
+                if block.get("type") == "text"
+            ]
+            return "".join(parts)
+
+        except requests.exceptions.HTTPError as e:
+            if resp.status_code in (429, 529, 503):
+                raise RuntimeError(
+                    f"Claude API (HTTP {resp.status_code}) failed after {max_retries} retries."
+                ) from e
+            raise RuntimeError(
+                f"Claude API error: {resp.status_code} - {resp.text[:200]}"
+            ) from e
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(
+                f"Unexpected Claude API response format: {e}"
+            ) from e
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                wait = 30 * (attempt + 1)
+                print(f"    Claude timed out after {timeout}s")
+                print(f"    Retrying in {wait}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(
+                f"Claude API timed out after {max_retries} retries"
+            )
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Claude API request failed: {e}") from e
+
+    raise RuntimeError(f"Claude API failed after {max_retries} retries")

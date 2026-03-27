@@ -29,16 +29,12 @@ Setup:
 import io
 import json
 import re
-import sys
-from contextlib import contextmanager
 from typing import Optional
 
 import polars as pl
 from tqdm.auto import tqdm
 
 from tctk._utils import (
-    call_gemini,
-    check_api_key,
     sql_escape,
     strip_accents,
     write_tsv_bom,
@@ -52,39 +48,28 @@ __all__ = ["Condition2ICD"]
 # Print-capture utility
 # -------------------------------------------------------------------
 
-@contextmanager
-def _capture_prints():
-    """Capture stdout while still printing to terminal.
-
-    Self-healing: if a previous run was interrupted and left a stale
-    _Tee as sys.stdout, unwraps it to find the real stream before
-    replacing. This prevents stacked _Tee objects that break Jupyter
-    output on cell re-run.
+class _LogBuf:
+    """Accumulate text alongside normal ``print()`` — no stdout hijack.
 
     Usage::
 
-        with _capture_prints() as buf:
-            print("hello")
-        captured = buf.getvalue()
+        log = _LogBuf()
+        log.print("hello")       # prints AND records
+        captured = log.getvalue()
     """
-    buf = io.StringIO()
-    # Unwrap any stale _Tee from a previous interrupted run
-    original = sys.stdout
-    while hasattr(original, "_tee_original"):
-        original = original._tee_original
-    # Tee: write to both original stdout and buffer
-    class _Tee:
-        _tee_original = original
-        def write(self, s):
-            original.write(s)
-            buf.write(s)
-        def flush(self):
-            original.flush()
-    sys.stdout = _Tee()
-    try:
-        yield buf
-    finally:
-        sys.stdout = original
+
+    def __init__(self):
+        self._buf = io.StringIO()
+
+    def print(self, *args, **kwargs):
+        """Drop-in for ``print()`` that also records to internal buffer."""
+        print(*args, **kwargs)
+        kwargs.pop("file", None)
+        kwargs.pop("flush", None)
+        print(*args, file=self._buf, **kwargs)
+
+    def getvalue(self):
+        return self._buf.getvalue()
 
 
 class Condition2ICD(ConditionMapperBase):
@@ -792,8 +777,9 @@ class Condition2ICD(ConditionMapperBase):
         icd10cm_index_path: Optional[str] = None,
         ai_review: bool = False,
         gemini_api_key: Optional[str] = None,
-        ai_tier: str = "flash",
-        ai_min_version: float = 3.0,
+        ai_provider: str = "gemini",
+        ai_tier: Optional[str] = None,
+        ai_min_version: Optional[float] = None,
         config_path: Optional[str] = None,
         ai_batch_size: Optional[int] = None,
         ai_passes: int = 2,
@@ -836,17 +822,21 @@ class Condition2ICD(ConditionMapperBase):
         icd10cm_index_path : str, optional
             Path to pre-extracted ICD-10-CM XML file for offline mode.
         ai_review : bool
-            If True, run AI review of fuzzy matches via Gemini API.
-            Default False.
+            If True, run AI review of fuzzy matches. Default False.
         gemini_api_key : str, optional
             Gemini API key for AI review. Falls back to key set via
             :meth:`set_api_key`, then env var, then config file.
-        ai_tier : str
-            Preferred Gemini model tier: "pro", "flash", or "flash-lite".
-            Default "flash".
-        ai_min_version : float
-            Minimum Gemini model version. Default 3.0 (prefer Gemini 3.x+).
-            Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
+        ai_provider : str
+            Primary AI provider: ``"gemini"`` or ``"claude"``.
+            Default ``"gemini"``. If primary fails, auto-falls back to
+            the other provider if its key is configured.
+        ai_tier : str, optional
+            Preferred model tier. Auto-resolves per provider if None:
+            Gemini → "pro", Claude → "sonnet".
+            Gemini options: "pro"/"flash"/"flash-lite".
+            Claude options: "opus"/"sonnet"/"haiku".
+        ai_min_version : float, optional
+            Minimum model version. Gemini default 3.0, Claude default 4.6.
         config_path : str, optional
             Path to JSON config file for API key.
         ai_batch_size : int, optional
@@ -912,33 +902,40 @@ class Condition2ICD(ConditionMapperBase):
         """
         do_ai_review = ai_review
         if do_ai_review:
-            from tctk._utils import load_api_key
-            resolved_key = gemini_api_key or self._api_key or load_api_key(config_path=config_path)
-            if not resolved_key:
-                print("  Warning: ai_review=True but no Gemini API key found. "
-                      "Skipping AI review.\n"
-                      "  Set a key via: mapper.set_api_key(key='...') or "
-                      "mapper.set_api_key(key_file='path.json')\n"
-                      "  Get a free key at: https://aistudio.google.com/apikey")
-                do_ai_review = False
+            if ai_provider == "claude":
+                if not self._claude_api_key:
+                    print("  Warning: ai_review=True with ai_provider='claude' "
+                          "but no Claude API key found. Skipping AI review.\n"
+                          "  Set a key via: mapper.set_api_key(claude_key='...') or "
+                          "mapper.set_api_key(claude_key_file='path.json')")
+                    do_ai_review = False
+            else:
+                from tctk._utils import load_api_key
+                resolved_key = gemini_api_key or self._api_key or load_api_key(config_path=config_path)
+                if not resolved_key:
+                    print("  Warning: ai_review=True but no Gemini API key found. "
+                          "Skipping AI review.\n"
+                          "  Set a key via: mapper.set_api_key(key='...') or "
+                          "mapper.set_api_key(key_file='path.json')\n"
+                          "  Get a free key at: https://aistudio.google.com/apikey")
+                    do_ai_review = False
         do_fallback = fallback_step > 0 and icdcm_lookup
         n_steps = 2 + (1 if icdcm_lookup else 0) + (1 if do_fallback else 0) + (1 if do_ai_review else 0)
         step = 0
 
-        # Capture all print output for later replay via print_summary()
-        _log = _capture_prints()
-        _buf = _log.__enter__()
+        # Log all print output for later replay via print_summary()
+        _log = _LogBuf()
 
         step += 1
-        print(f"\033[1m[{step}/{n_steps}] Building search terms...\033[0m")
+        _log.print(f"\033[1m[{step}/{n_steps}] Building search terms...\033[0m")
         df_input = self._build_input(conditions)
-        print(
+        _log.print(
             f"  Conditions: {df_input['condition_name'].n_unique()}, "
             f"Search terms: {len(df_input)}"
         )
 
         step += 1
-        print(f"\n\033[1m[{step}/{n_steps}] Matching against vocabulary...\033[0m")
+        _log.print(f"\n\033[1m[{step}/{n_steps}] Matching against vocabulary...\033[0m")
         df_exact, df_fuzzy = self._omop_lookup(df_input, vocab="ICD", fuzzy_threshold=fuzzy_threshold)
 
         # Combine exact + fuzzy into single DataFrame
@@ -974,7 +971,7 @@ class Condition2ICD(ConditionMapperBase):
         )
 
         if not do_ai_review and fuzzy_threshold < 85 and len(df_fuzzy) > 0:
-            print(f"\n  Warning: AI review is off and fuzzy_threshold={fuzzy_threshold}. "
+            _log.print(f"\n  Warning: AI review is off and fuzzy_threshold={fuzzy_threshold}. "
                   f"Low-score fuzzy matches won't be vetted. "
                   f"Consider fuzzy_threshold >= 85 or enabling ai_review=True.")
 
@@ -990,7 +987,7 @@ class Condition2ICD(ConditionMapperBase):
 
         if icdcm_lookup:
             step += 1
-            print(f"\n\033[1m[{step}/{n_steps}] ICD-CM index lookup...\033[0m")
+            _log.print(f"\n\033[1m[{step}/{n_steps}] ICD-CM index lookup...\033[0m")
             results = self._icdcm_lookup(
                 results,
                 fuzzy_threshold=fuzzy_threshold,
@@ -1030,13 +1027,13 @@ class Condition2ICD(ConditionMapperBase):
             fb_stats = []  # [(threshold, n_newly_matched)]
 
             if unmapped_conds and fb_threshold >= fallback_floor:
-                print(f"\n\033[1m[{step}/{n_steps}] Fallback for {len(unmapped_conds)} unmapped conditions...\033[0m")
+                _log.print(f"\n\033[1m[{step}/{n_steps}] Fallback for {len(unmapped_conds)} unmapped conditions...\033[0m")
             else:
-                print(f"\n\033[1m[{step}/{n_steps}] Fallback: no unmapped conditions, skipping.\033[0m")
+                _log.print(f"\n\033[1m[{step}/{n_steps}] Fallback: no unmapped conditions, skipping.\033[0m")
 
             while unmapped_conds and fb_threshold >= fallback_floor:
-                print(f"\n  --- Fallback pass (threshold={fb_threshold}) ---")
-                print(f"  Unmapped conditions: {len(unmapped_conds)}")
+                _log.print(f"\n  --- Fallback pass (threshold={fb_threshold}) ---")
+                _log.print(f"  Unmapped conditions: {len(unmapped_conds)}")
 
                 # Filter input to unmapped conditions only
                 df_input_fb = df_input.filter(
@@ -1094,11 +1091,11 @@ class Condition2ICD(ConditionMapperBase):
                             [df_matches, df_fb], how="diagonal_relaxed"
                         )
                         unmapped_conds -= new_matched
-                        print(f"  Matched {len(new_matched)} new conditions")
+                        _log.print(f"  Matched {len(new_matched)} new conditions")
                     else:
-                        print(f"  No new conditions matched")
+                        _log.print(f"  No new conditions matched")
                 else:
-                    print(f"  No new conditions matched")
+                    _log.print(f"  No new conditions matched")
 
                 fb_threshold -= fallback_step
 
@@ -1106,12 +1103,12 @@ class Condition2ICD(ConditionMapperBase):
             if fb_stats:
                 total_rescued = sum(n for _, n in fb_stats)
                 parts = [f"{n} at {t}" for t, n in fb_stats]
-                print(f"\n  Fallback total: {total_rescued} conditions rescued "
+                _log.print(f"\n  Fallback total: {total_rescued} conditions rescued "
                       f"({', '.join(parts)})")
                 if unmapped_conds:
-                    print(f"  Still unmapped: {len(unmapped_conds)} conditions")
+                    _log.print(f"  Still unmapped: {len(unmapped_conds)} conditions")
             elif unmapped_conds:
-                print(f"  Fallback: no new matches found. "
+                _log.print(f"  Fallback: no new matches found. "
                       f"{len(unmapped_conds)} conditions remain unmapped.")
 
             results["df_matches"] = df_matches
@@ -1119,11 +1116,12 @@ class Condition2ICD(ConditionMapperBase):
 
         if do_ai_review:
             step += 1
-            print(f"\n\033[1m[{step}/{n_steps}] AI review...\033[0m")
+            _log.print(f"\n\033[1m[{step}/{n_steps}] AI review...\033[0m")
             results = self.ai_review(
                 results,
                 batch_size=ai_batch_size,
                 gemini_api_key=gemini_api_key,
+                ai_provider=ai_provider,
                 ai_tier=ai_tier,
                 ai_min_version=ai_min_version,
                 config_path=config_path,
@@ -1422,19 +1420,19 @@ class Condition2ICD(ConditionMapperBase):
 
         sep = "  " + "-" * col_w[0] + "-+-" + "-+-".join("-" * col_w[i] for i in range(1, len(hdr)))
 
-        print(f"\n{'=' * 40}")
-        print(f"  FINAL SUMMARY")
-        print(f"{'=' * 40}")
-        print(f"  Conditions: {n_mapped} mapped, {n_unmapped} unmapped (of {n_conditions})")
-        print(f"  Search terms: {n_search_terms}")
-        print(f"{'-' * 40}")
-        print(_fmt(hdr))
-        print(sep)
+        _log.print(f"\n{'=' * 40}")
+        _log.print(f"  FINAL SUMMARY")
+        _log.print(f"{'=' * 40}")
+        _log.print(f"  Conditions: {n_mapped} mapped, {n_unmapped} unmapped (of {n_conditions})")
+        _log.print(f"  Search terms: {n_search_terms}")
+        _log.print(f"{'-' * 40}")
+        _log.print(_fmt(hdr))
+        _log.print(sep)
         for r in rows:
-            print(_fmt(r))
-        print(sep)
-        print(_fmt(totals))
-        print(f"{'-' * 40}")
+            _log.print(_fmt(r))
+        _log.print(sep)
+        _log.print(_fmt(totals))
+        _log.print(f"{'-' * 40}")
 
         # ICD version breakdown (accepted)
         if len(df_accepted) > 0:
@@ -1444,7 +1442,7 @@ class Condition2ICD(ConditionMapperBase):
             ).sort("icd_version")
             for row in version_counts.iter_rows(named=True):
                 label = f"ICD-{row['icd_version']}-CM"
-                print(f"  {label}: {row['total_codes']} codes, "
+                _log.print(f"  {label}: {row['total_codes']} codes, "
                       f"{row['n_condition_version_pairs']} conditions")
 
         # Hits per condition (only conditions with >=1 match)
@@ -1455,7 +1453,7 @@ class Condition2ICD(ConditionMapperBase):
                 .agg(pl.len().alias("n_hits"))
                 ["n_hits"]
             )
-            print(f"  Hits/condition: "
+            _log.print(f"  Hits/condition: "
                   f"min={hits_per_cond.min()} "
                   f"max={hits_per_cond.max()} "
                   f"med={hits_per_cond.median():.0f} "
@@ -1469,21 +1467,21 @@ class Condition2ICD(ConditionMapperBase):
             if len(reviewed) > 0:
                 verdicts = reviewed.group_by("ai_verdict").len().sort("ai_verdict")
                 parts = [f"{r['ai_verdict']}={r['len']}" for r in verdicts.iter_rows(named=True)]
-                print(f"  AI reviewed: {len(reviewed)} ({', '.join(parts)})")
+                _log.print(f"  AI reviewed: {len(reviewed)} ({', '.join(parts)})")
                 if "ai_combined_confidence" in reviewed.columns:
                     rel = reviewed.filter(
                         pl.col("ai_combined_confidence").is_not_null()
                     ).group_by("ai_combined_confidence").len().sort("ai_combined_confidence")
                     if len(rel) > 0:
                         rel_parts = [f"{r['ai_combined_confidence']}={r['len']}" for r in rel.iter_rows(named=True)]
-                        print(f"  AI reliability: {', '.join(rel_parts)}")
+                        _log.print(f"  AI reliability: {', '.join(rel_parts)}")
 
         fb_stats = results.get("_fallback_stats", [])
         if fb_stats:
             fb_total = sum(n for _, n in fb_stats)
             fb_parts = [f"{n} at {t}" for t, n in fb_stats]
-            print(f"  Fallback: {fb_total} conditions rescued ({', '.join(fb_parts)})")
-        print(f"{'=' * 40}")
+            _log.print(f"  Fallback: {fb_total} conditions rescued ({', '.join(fb_parts)})")
+        _log.print(f"{'=' * 40}")
 
         # --- Export ---
         if export_tsv:
@@ -1493,17 +1491,16 @@ class Condition2ICD(ConditionMapperBase):
             write_tsv_bom(df_rejected, f"{export_prefix}_rejected.tsv")
             write_tsv_bom(df_unmatched_terms, f"{export_prefix}_unmatched_terms.tsv")
             write_tsv_bom(df_unmapped_conditions, f"{export_prefix}_unmapped_conditions.tsv")
-            print(f"\nExported:")
-            print(f"  {export_prefix}_full.tsv                  ({len(df_review)} matches)")
-            print(f"  {export_prefix}_accepted.tsv              ({len(df_accepted)} matches)")
-            print(f"  {export_prefix}_human_review.tsv          ({len(df_human_review)} matches)")
-            print(f"  {export_prefix}_rejected.tsv              ({len(df_rejected)} matches)")
-            print(f"  {export_prefix}_unmatched_terms.tsv       ({len(df_unmatched_terms)} terms)")
-            print(f"  {export_prefix}_unmapped_conditions.tsv   ({len(df_unmapped_conditions)} conditions)")
+            _log.print(f"\nExported:")
+            _log.print(f"  {export_prefix}_full.tsv                  ({len(df_review)} matches)")
+            _log.print(f"  {export_prefix}_accepted.tsv              ({len(df_accepted)} matches)")
+            _log.print(f"  {export_prefix}_human_review.tsv          ({len(df_human_review)} matches)")
+            _log.print(f"  {export_prefix}_rejected.tsv              ({len(df_rejected)} matches)")
+            _log.print(f"  {export_prefix}_unmatched_terms.tsv       ({len(df_unmatched_terms)} terms)")
+            _log.print(f"  {export_prefix}_unmapped_conditions.tsv   ({len(df_unmapped_conditions)} conditions)")
 
-        # Stop capturing and store the log
-        _log.__exit__(None, None, None)
-        results["_run_log"] = _buf.getvalue()
+        # Store the log
+        results["_run_log"] = _log.getvalue()
 
         return results
 
@@ -1785,8 +1782,9 @@ class Condition2ICD(ConditionMapperBase):
     def review_snomed_overlaps(
         self,
         snomed_results: dict,
-        ai_tier: str = "flash",
-        ai_min_version: float = 3.0,
+        ai_provider: str = "gemini",
+        ai_tier: Optional[str] = None,
+        ai_min_version: Optional[float] = None,
         ai_passes: int = 2,
         export_tsv: bool = False,
         export_prefix: str = "snomed_mapping",
@@ -1794,18 +1792,22 @@ class Condition2ICD(ConditionMapperBase):
         """AI review of SNOMED concepts shared by 2+ conditions.
 
         For each (SNOMED concept, condition) pair in the overlap set,
-        asks Gemini whether the mapping is clinically valid or an artifact
-        of broad ICD coding.
+        asks the AI whether the mapping is clinically valid or an artifact
+        of broad ICD coding. Supports Gemini and Claude with auto-fallback.
 
         Parameters
         ----------
         snomed_results : dict
             Output of :meth:`icd_to_snomed` containing ``df_snomed``
             and ``df_overlaps``.
-        ai_tier : str
-            Preferred Gemini model tier. Default "flash".
-        ai_min_version : float
-            Minimum Gemini model version. Default 3.0.
+        ai_provider : str
+            Primary AI provider: ``"gemini"`` or ``"claude"``.
+            Default ``"gemini"``.
+        ai_tier : str, optional
+            Preferred model tier. Auto-resolves per provider if None:
+            Gemini → "pro", Claude → "sonnet".
+        ai_min_version : float, optional
+            Minimum model version. Gemini default 3.0, Claude default 4.6.
         ai_passes : int
             Number of independent AI passes. Default 2.
         export_tsv : bool
@@ -1823,7 +1825,8 @@ class Condition2ICD(ConditionMapperBase):
             - ``df_reviewed`` — per (snomed, condition) verdicts
             - ``df_snomed_accepted`` — grouped by condition, AI rejects removed
         """
-        model = self._resolve_model(
+        provider, model = self._resolve_model(
+            ai_provider=ai_provider,
             ai_tier=ai_tier, ai_min_version=ai_min_version,
         )
 
@@ -1873,9 +1876,9 @@ class Condition2ICD(ConditionMapperBase):
                 )
                 print(f"\nExported:")
                 print(f"  {export_prefix}_snomed_full.tsv       "
-                      f"({len(df_snomed_full)} rows)")
+                           f"({len(df_snomed_full)} rows)")
                 print(f"  {export_prefix}_snomed_accepted.tsv   "
-                      f"({len(snomed_results['df_snomed_accepted'])} conditions)")
+                           f"({len(snomed_results['df_snomed_accepted'])} conditions)")
             return snomed_results
 
         # ── Step 1: Build review items ────────────────────────────────
@@ -1984,27 +1987,48 @@ class Condition2ICD(ConditionMapperBase):
 
         for pass_num in tqdm(range(1, ai_passes + 1),
                              desc="  AI overlap review", unit="pass"):
+            raw = None
             for attempt in range(3):
                 try:
-                    raw = call_gemini(
-                        full_prompt,
-                        api_key=check_api_key(self._api_key),
-                        model=model,
-                        temperature=0.0 if pass_num == 1 else 0.2,
+                    raw = self._call_ai(
+                        provider, data_prompt, model,
+                        system_prompt=system_prompt,
                         response_schema=response_schema,
+                        temperature=0.0 if pass_num == 1 else 0.2,
                     )
                     break
-                except RuntimeError as e:
-                    if "timed out" in str(e) and attempt < 2:
-                        tqdm.write(f"    Timeout, retrying ({attempt + 1}/2)...")
+                except Exception as e:
+                    if attempt < 2:
+                        if "timed out" in str(e):
+                            print(f"    Timeout, retrying ({attempt + 1}/2)...")
+                            continue
+                        import time as _time
+                        _time.sleep(30 * (attempt + 1))
                         continue
-                    raise
+                    # Primary exhausted — try fallback
+                    fallback = "claude" if provider == "gemini" else "gemini"
+                    if self._has_provider(fallback):
+                        print(f"  {provider} failed, trying {fallback}...")
+                        try:
+                            _, fb_model = self._resolve_model(
+                                ai_provider=fallback,
+                            )
+                            raw = self._call_ai(
+                                fallback, data_prompt, fb_model,
+                                system_prompt=system_prompt,
+                                response_schema=response_schema,
+                                temperature=0.0 if pass_num == 1 else 0.2,
+                            )
+                        except Exception as fb_e:
+                            print(f"  {fallback} also failed: {fb_e}")
+                    if raw is None:
+                        raise
 
             try:
-                parsed = json.loads(raw)
+                parsed = self._parse_ai_json(raw)
                 verdicts = parsed.get("verdicts", [])
-            except (json.JSONDecodeError, AttributeError):
-                print(f"    Warning: pass {pass_num} returned invalid JSON")
+            except (json.JSONDecodeError, AttributeError, TypeError, RuntimeError) as exc:
+                print(f"    Warning: pass {pass_num} returned unparseable response: {exc}")
                 verdicts = []
 
             print(f"    Received {len(verdicts)} verdicts")
@@ -2182,10 +2206,10 @@ class Condition2ICD(ConditionMapperBase):
             write_tsv_bom(df_reviewed, f"{export_prefix}_snomed_reviewed.tsv")
             print(f"\nExported:")
             print(f"  {export_prefix}_snomed_full.tsv       "
-                  f"({len(df_snomed)} rows)")
+                       f"({len(df_snomed)} rows)")
             print(f"  {export_prefix}_snomed_accepted.tsv   "
-                  f"({len(df_snomed_accepted)} conditions)")
+                       f"({len(df_snomed_accepted)} conditions)")
             print(f"  {export_prefix}_snomed_reviewed.tsv   "
-                  f"({len(df_reviewed)} overlap pairs)")
+                       f"({len(df_reviewed)} overlap pairs)")
 
         return snomed_results
