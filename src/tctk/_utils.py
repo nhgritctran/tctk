@@ -72,16 +72,12 @@ def write_tsv_bom(df: pl.DataFrame, path: str) -> None:
 def load_config(config_path: Optional[str] = None) -> dict:
     """Load JSON config from a local file.
 
-    Parameters
-    ----------
-    config_path : str, optional
-        Explicit path to config JSON file.
-        If None, searches default config paths.
+    Args:
+        config_path (str, optional): Explicit path to config JSON file.
+            If None, searches default config paths.
 
-    Returns
-    -------
-    dict
-        Parsed config, or empty dict if no config found.
+    Returns:
+        dict: Parsed config, or empty dict if no config found.
     """
     search_paths = (
         [Path(config_path)] if config_path else CONFIG_PATHS
@@ -109,19 +105,13 @@ def load_api_key(
         2. Environment variable
         3. Config file (explicit path, then default search paths)
 
-    Parameters
-    ----------
-    api_key : str, optional
-        Directly provided API key.
-    config_path : str, optional
-        Path to config JSON file.
-    env_var : str
-        Environment variable name. Default "GEMINI_API_KEY".
+    Args:
+        api_key (str, optional): Directly provided API key.
+        config_path (str, optional): Path to config JSON file.
+        env_var (str): Environment variable name. Default "GEMINI_API_KEY".
 
-    Returns
-    -------
-    str or None
-        API key if found, None otherwise.
+    Returns:
+        str or None: API key if found, None otherwise.
     """
     if api_key:
         return api_key
@@ -150,17 +140,12 @@ def load_anthropic_api_key(
 
     No environment variables — keys are loaded from JSON config files only.
 
-    Parameters
-    ----------
-    api_key : str, optional
-        Directly provided API key.
-    config_path : str, optional
-        Path to config JSON file.
+    Args:
+        api_key (str, optional): Directly provided API key.
+        config_path (str, optional): Path to config JSON file.
 
-    Returns
-    -------
-    str or None
-        API key if found, None otherwise.
+    Returns:
+        str or None: API key if found, None otherwise.
     """
     if api_key:
         return api_key
@@ -176,20 +161,14 @@ def load_anthropic_api_key(
 def check_api_key(api_key: Optional[str]) -> str:
     """Validate API key is available; raise ValueError with instructions if not.
 
-    Parameters
-    ----------
-    api_key : str or None
-        The API key to check.
+    Args:
+        api_key (str or None): The API key to check.
 
-    Returns
-    -------
-    str
-        The validated API key.
+    Returns:
+        str: The validated API key.
 
-    Raises
-    ------
-    ValueError
-        If api_key is None or empty.
+    Raises:
+        ValueError: If api_key is None or empty.
     """
     if not api_key:
         raise ValueError(
@@ -212,11 +191,9 @@ def setup_credentials(path: Optional[str] = None) -> None:
     Creates a JSON file with the Gemini API key. Uses getpass to hide
     input. Sets file permissions to owner-only on Unix systems.
 
-    Parameters
-    ----------
-    path : str, optional
-        Path for the credentials file.
-        Defaults to ~/.config/tctk/credentials.json.
+    Args:
+        path (str, optional): Path for the credentials file.
+            Defaults to ~/.config/tctk/credentials.json.
     """
     import getpass
 
@@ -272,11 +249,15 @@ def _parse_model_tier(model_name: str) -> Optional[str]:
     Excludes image, vision, preview, embedding, and other
     non-text-generation models.
 
-    Examples:
-        "gemini-2.5-pro"             → "pro"
-        "gemini-2.5-flash"           → "flash"
-        "gemini-2.0-flash-lite"      → "flash-lite"
-        "gemini-3.1-flash-image-preview" → None (excluded)
+    Example:
+        >>> _parse_model_tier("gemini-2.5-pro")
+        'pro'
+        >>> _parse_model_tier("gemini-2.5-flash")
+        'flash'
+        >>> _parse_model_tier("gemini-2.0-flash-lite")
+        'flash-lite'
+        >>> _parse_model_tier("gemini-3.1-flash-image-preview")
+        # None (excluded)
     """
     name = model_name.lower()
 
@@ -296,9 +277,11 @@ def _parse_model_tier(model_name: str) -> Optional[str]:
 def _parse_model_version(model_name: str) -> float:
     """Extract numeric version from a Gemini model name.
 
-    Examples:
-        "gemini-2.5-pro"   → 2.5
-        "gemini-2.0-flash" → 2.0
+    Example:
+        >>> _parse_model_version("gemini-2.5-pro")
+        2.5
+        >>> _parse_model_version("gemini-2.0-flash")
+        2.0
     """
     match = re.search(r"(\d+\.\d+)", model_name)
     return float(match.group(1)) if match else 0.0
@@ -311,27 +294,19 @@ def detect_best_model(
 ) -> str:
     """Query Gemini API and select the best available text model.
 
-    Parameters
-    ----------
-    api_key : str
-        Gemini API key.
-    ai_tier : str, optional
-        Preferred tier: "pro", "flash", or "flash-lite".
-        Default None → picks "flash" tier (cost-effective default),
-        then best version within that tier.
-    min_version : float
-        Minimum model version. Default 3.0 (prefer Gemini 3.x+).
-        Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
+    Args:
+        api_key (str): Gemini API key.
+        ai_tier (str, optional): Preferred tier: "pro", "flash", or "flash-lite".
+            Default None picks "flash" tier (cost-effective default),
+            then best version within that tier.
+        min_version (float): Minimum model version. Default 3.0 (prefer Gemini 3.x+).
+            Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
 
-    Returns
-    -------
-    str
-        Full model name (e.g., "gemini-3.0-flash").
+    Returns:
+        str: Full model name (e.g., "gemini-3.0-flash").
 
-    Raises
-    ------
-    RuntimeError
-        If no suitable models are found.
+    Raises:
+        RuntimeError: If no suitable models are found.
     """
     import requests
 
@@ -435,34 +410,21 @@ def call_gemini(
 ) -> str:
     """Call Gemini API directly via REST with automatic retry on rate limits.
 
-    Parameters
-    ----------
-    prompt : str
-        The prompt text.
-    api_key : str
-        Gemini API key.
-    model : str
-        Full model name (e.g., "gemini-3.0-pro").
-    temperature : float
-        Sampling temperature. Default 0.0 (deterministic).
-    max_output_tokens : int
-        Max tokens in response. Default 65536.
-    timeout : int
-        Request timeout in seconds. Default 300.
-    max_retries : int
-        Maximum retries on 429 rate limit errors. Default 3.
-    response_schema : dict, optional
-        JSON schema for structured output.
+    Args:
+        prompt (str): The prompt text.
+        api_key (str): Gemini API key.
+        model (str): Full model name (e.g., "gemini-3.0-pro").
+        temperature (float): Sampling temperature. Default 0.0 (deterministic).
+        max_output_tokens (int): Max tokens in response. Default 65536.
+        timeout (int): Request timeout in seconds. Default 300.
+        max_retries (int): Maximum retries on 429 rate limit errors. Default 3.
+        response_schema (dict, optional): JSON schema for structured output.
 
-    Returns
-    -------
-    str
-        Model response text.
+    Returns:
+        str: Model response text.
 
-    Raises
-    ------
-    RuntimeError
-        If the API call fails after all retries.
+    Raises:
+        RuntimeError: If the API call fails after all retries.
     """
     import requests
 
@@ -576,21 +538,14 @@ def create_gemini_cache(
     Returns None immediately if the prompt is too short (rough
     estimate: 4 chars per token).
 
-    Parameters
-    ----------
-    system_prompt : str
-        The system instruction text to cache.
-    api_key : str
-        Gemini API key.
-    model : str
-        Model name (e.g. "gemini-3.0-flash").
-    ttl : str
-        Time-to-live for the cache. Default "3600s" (1 hour).
+    Args:
+        system_prompt (str): The system instruction text to cache.
+        api_key (str): Gemini API key.
+        model (str): Model name (e.g. "gemini-3.0-flash").
+        ttl (str): Time-to-live for the cache. Default "3600s" (1 hour).
 
-    Returns
-    -------
-    str or None
-        Cache name (e.g. "cachedContents/abc123") on success, None on failure.
+    Returns:
+        str or None: Cache name (e.g. "cachedContents/abc123") on success, None on failure.
     """
     # Rough token estimate: ~4 chars per token
     est_tokens = len(system_prompt) // 4
@@ -639,31 +594,19 @@ def call_gemini_cached(
     instead of resending the system prompt. Falls back to
     ``call_gemini()`` if the cached call fails with a 4xx error.
 
-    Parameters
-    ----------
-    prompt : str
-        The data prompt text (system prompt is in the cache).
-    api_key : str
-        Gemini API key.
-    model : str
-        Full model name (e.g. "gemini-3.0-flash").
-    cache_name : str
-        Cache name from ``create_gemini_cache()``.
-    temperature : float
-        Sampling temperature. Default 0.0.
-    max_output_tokens : int
-        Max tokens in response.
-    timeout : int
-        Request timeout in seconds.
-    max_retries : int
-        Maximum retries on 429/503 errors.
-    response_schema : dict, optional
-        JSON schema for structured output.
+    Args:
+        prompt (str): The data prompt text (system prompt is in the cache).
+        api_key (str): Gemini API key.
+        model (str): Full model name (e.g. "gemini-3.0-flash").
+        cache_name (str): Cache name from ``create_gemini_cache()``.
+        temperature (float): Sampling temperature. Default 0.0.
+        max_output_tokens (int): Max tokens in response.
+        timeout (int): Request timeout in seconds.
+        max_retries (int): Maximum retries on 429/503 errors.
+        response_schema (dict, optional): JSON schema for structured output.
 
-    Returns
-    -------
-    str
-        Model response text.
+    Returns:
+        str: Model response text.
     """
     import requests
 
@@ -752,12 +695,9 @@ def call_gemini_cached(
 def delete_gemini_cache(cache_name: str, api_key: str) -> None:
     """Delete a Gemini cached content entry (best-effort).
 
-    Parameters
-    ----------
-    cache_name : str
-        Cache name (e.g. "cachedContents/abc123").
-    api_key : str
-        Gemini API key.
+    Args:
+        cache_name (str): Cache name (e.g. "cachedContents/abc123").
+        api_key (str): Gemini API key.
     """
     import requests
 
@@ -786,34 +726,21 @@ def call_claude(
 
     Retries on HTTP 429 (rate limit), 529 (overloaded), and 5xx errors.
 
-    Parameters
-    ----------
-    prompt : str
-        The user prompt text.
-    api_key : str
-        Anthropic API key.
-    model : str
-        Model name. Default "claude-sonnet-4-6".
-    system_prompt : str
-        Optional system prompt.
-    temperature : float
-        Sampling temperature. Default 0.0 (deterministic).
-    max_output_tokens : int
-        Max tokens in response. Default 16384.
-    timeout : int
-        Request timeout in seconds. Default 300.
-    max_retries : int
-        Maximum retries on retryable errors. Default 3.
+    Args:
+        prompt (str): The user prompt text.
+        api_key (str): Anthropic API key.
+        model (str): Model name. Default "claude-sonnet-4-6".
+        system_prompt (str): Optional system prompt.
+        temperature (float): Sampling temperature. Default 0.0 (deterministic).
+        max_output_tokens (int): Max tokens in response. Default 16384.
+        timeout (int): Request timeout in seconds. Default 300.
+        max_retries (int): Maximum retries on retryable errors. Default 3.
 
-    Returns
-    -------
-    str
-        Model response text.
+    Returns:
+        str: Model response text.
 
-    Raises
-    ------
-    RuntimeError
-        If the API call fails after all retries.
+    Raises:
+        RuntimeError: If the API call fails after all retries.
     """
     import requests
 

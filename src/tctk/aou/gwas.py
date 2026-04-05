@@ -41,14 +41,15 @@ class GWAS:
         """
         Generate a simple PLINK2 filtering script.
 
-        :param custom_args: Extra args to be used
-        :param script_name: Name of the output shell script
-        :param hwe_threshold: Hardy-Weinberg's equilibrium p-value threshold
-        :param geno_threshold: Genotype missingness threshold
-        :param mind_threshold: Individual missingness threshold
-        :param maf_threshold: Minor allele frequency threshold
-        :param split_multi_allelic: split multi-allelic alleles or not
-        :param biallelic_only: use only biallelic alleles or not
+        Args:
+            script_name (str): Name of the output shell script
+            hwe_threshold (float): Hardy-Weinberg's equilibrium p-value threshold
+            geno_threshold (float): Genotype missingness threshold
+            mind_threshold (float): Individual missingness threshold
+            maf_threshold (float): Minor allele frequency threshold
+            biallelic_only (bool): use only biallelic alleles or not
+            split_multi_allelic (bool): split multi-allelic alleles or not
+            custom_args (str): Extra args to be used
         """
 
         prerun_command = "PLINK_OUTPUT_BASE=$(echo $OUTPUT_PGEN | sed 's/.pgen$//g')"
@@ -194,9 +195,9 @@ class GWAS:
         """
         Merge shell scripts, removing the first line (shebang) from all but the first script.
 
-        Parameters:
-        script_files: list of script file paths
-        output_file: output file path
+        Args:
+            script_file_list (list): list of script file paths
+            output_file_name (str): output file path
         """
         with open(output_file_name, 'w') as outfile:
             for i, script_file in enumerate(script_file_list):

@@ -78,13 +78,10 @@ class Condition2ICD(ConditionMapperBase):
     Uses a local DuckDB vocabulary database built from Athena CSV files.
     No network access required for mapping — only for optional AI review.
 
-    Parameters
-    ----------
-    vocab_db : str, optional
-        Path to the DuckDB vocabulary database.
-        Default: auto-downloaded from Hugging Face
-    force_download_db : bool
-        Force re-download of the vocabulary database. Default False.
+    Args:
+        vocab_db (str, optional): Path to the DuckDB vocabulary database.
+            Default: auto-downloaded from Hugging Face
+        force_download_db (bool): Force re-download of the vocabulary database. Default False.
     """
 
     _TARGET_ID_COL = "icd_concept_id"
@@ -297,21 +294,18 @@ class Condition2ICD(ConditionMapperBase):
         fuzzy hits get ``match_type="fuzzy"``.  Results are appended to
         ``df_matches``.
 
-        Parameters
-        ----------
-        results : dict
-            Pipeline results containing df_matches, df_input, df_exact, df_fuzzy.
-        fuzzy_threshold : int
-            Minimum fuzzy score (0-100) for CDC matching. Default 85.
-        icd9cm_index_path : str, optional
-            Path to pre-extracted ICD-9-CM text file (offline mode).
-        icd10cm_index_path : str, optional
-            Path to pre-extracted ICD-10-CM XML file (offline mode).
+        Args:
+            results (dict): Pipeline results containing df_matches, df_input,
+                df_exact, df_fuzzy.
+            fuzzy_threshold (int): Minimum fuzzy score (0-100) for CDC matching.
+                Default 85.
+            icd9cm_index_path (str, optional): Path to pre-extracted ICD-9-CM text
+                file (offline mode).
+            icd10cm_index_path (str, optional): Path to pre-extracted ICD-10-CM XML
+                file (offline mode).
 
-        Returns
-        -------
-        dict
-            Updated results with CDC matches appended to df_matches.
+        Returns:
+            dict: Updated results with CDC matches appended to df_matches.
         """
         from tctk.cdc import CDCIndex, CDCIndex9
 
@@ -788,117 +782,95 @@ class Condition2ICD(ConditionMapperBase):
     ) -> dict:
         """Map condition names and their synonyms to OMOP ICD Concept IDs.
 
-        Parameters
-        ----------
-        conditions : dict[str, list[str]]
-            Keys are condition names; values are lists of condition synonyms.
-        fuzzy_threshold : int
-            Minimum score (0-100) for rapidfuzz token_sort_ratio.
-            Shared across OMOP and CDC index matching.  Default 85.
-        icdcm_lookup : bool
-            If True (default), search all input terms against the CDC
-            ICD-10-CM and ICD-9-CM indices after OMOP matching, then
-            deduplicate across both sources.
-        auto_threshold : bool
-            When True (default) and ``icdcm_lookup`` is enabled, perform
-            a post-hoc threshold sweep after combining OMOP + CDC
-            results. Auto-raises the threshold up to ``auto_threshold_max``
-            to reduce fuzzy matches sent to AI review.  Dropped codes
-            that add diversity (parents or unrelated codes) are rescued;
-            only children of already-kept codes are discarded.
-        auto_threshold_max : int
-            Ceiling for the auto-threshold sweep (default 90).  The sweep
-            will raise the effective threshold up to this value.
-        fallback_step : int
-            After the main pass, re-run OMOP + CDC lookup at progressively
-            lower thresholds for conditions with zero hits.  Each iteration
-            lowers the threshold by this amount (default 5).  Set to 0 to
-            disable fallback.
-        fallback_floor : int
-            Lowest threshold the fallback loop will try (default 50).
-            Conditions still unmapped at the floor are reported as unmapped.
-        icd9cm_index_path : str, optional
-            Path to pre-extracted ICD-9-CM text file for offline mode.
-        icd10cm_index_path : str, optional
-            Path to pre-extracted ICD-10-CM XML file for offline mode.
-        ai_review : bool
-            If True, run AI review of fuzzy matches. Default False.
-        gemini_api_key : str, optional
-            Gemini API key for AI review. Falls back to key set via
-            :meth:`set_api_key`, then env var, then config file.
-        ai_provider : str
-            Primary AI provider: ``"gemini"`` or ``"claude"``.
-            Default ``"gemini"``. If primary fails, auto-falls back to
-            the other provider if its key is configured.
-        ai_tier : str, optional
-            Preferred model tier. Auto-resolves per provider if None:
-            Gemini → "pro", Claude → "sonnet".
-            Gemini options: "pro"/"flash"/"flash-lite".
-            Claude options: "opus"/"sonnet"/"haiku".
-        ai_min_version : float, optional
-            Minimum model version. Gemini default 3.0, Claude default 4.6.
-        config_path : str, optional
-            Path to JSON config file for API key.
-        ai_batch_size : int, optional
-            Conditions per AI review API call. If None, auto-calculated.
-        ai_passes : int
-            Number of initial AI review passes. Default 2.
-            Uses adaptive replication: 2 initial passes, then up to 5
-            for disagreements. Set to 1 for single-pass mode.
-        export_tsv : bool
-            If True, write three TSV files:
-            ``{export_prefix}_full.tsv`` — complete review table (1 row
-            per match pair, the most comprehensive output).
-            ``{export_prefix}_accepted.tsv`` — grouped accepted matches.
-            ``{export_prefix}_rejected.tsv`` — rejected, human review,
-            and unmatched rows.
-            Default False.
-        export_prefix : str
-            Filename prefix for exported TSV files. Default "mapping".
+        Args:
+            conditions (dict[str, list[str]]): Keys are condition names; values are
+                lists of condition synonyms.
+            fuzzy_threshold (int): Minimum score (0-100) for rapidfuzz token_sort_ratio.
+                Shared across OMOP and CDC index matching.  Default 85.
+            icdcm_lookup (bool): If True (default), search all input terms against the
+                CDC ICD-10-CM and ICD-9-CM indices after OMOP matching, then deduplicate
+                across both sources.
+            auto_threshold (bool): When True (default) and ``icdcm_lookup`` is enabled,
+                perform a post-hoc threshold sweep after combining OMOP + CDC results.
+                Auto-raises the threshold up to ``auto_threshold_max`` to reduce fuzzy
+                matches sent to AI review.  Dropped codes that add diversity (parents or
+                unrelated codes) are rescued; only children of already-kept codes are
+                discarded.
+            auto_threshold_max (int): Ceiling for the auto-threshold sweep (default 90).
+                The sweep will raise the effective threshold up to this value.
+            fallback_step (int): After the main pass, re-run OMOP + CDC lookup at
+                progressively lower thresholds for conditions with zero hits.  Each
+                iteration lowers the threshold by this amount (default 5).  Set to 0 to
+                disable fallback.
+            fallback_floor (int): Lowest threshold the fallback loop will try
+                (default 50). Conditions still unmapped at the floor are reported as
+                unmapped.
+            icd9cm_index_path (str, optional): Path to pre-extracted ICD-9-CM text file
+                for offline mode.
+            icd10cm_index_path (str, optional): Path to pre-extracted ICD-10-CM XML file
+                for offline mode.
+            ai_review (bool): If True, run AI review of fuzzy matches. Default False.
+            gemini_api_key (str, optional): Gemini API key for AI review. Falls back to
+                key set via :meth:`set_api_key`, then env var, then config file.
+            ai_provider (str): Primary AI provider: ``"gemini"`` or ``"claude"``.
+                Default ``"gemini"``. If primary fails, auto-falls back to the other
+                provider if its key is configured.
+            ai_tier (str, optional): Preferred model tier. Auto-resolves per provider if
+                None: Gemini → "pro", Claude → "sonnet".
+                Gemini options: "pro"/"flash"/"flash-lite".
+                Claude options: "opus"/"sonnet"/"haiku".
+            ai_min_version (float, optional): Minimum model version. Gemini default 3.0,
+                Claude default 4.6.
+            config_path (str, optional): Path to JSON config file for API key.
+            ai_batch_size (int, optional): Conditions per AI review API call. If None,
+                auto-calculated.
+            ai_passes (int): Number of initial AI review passes. Default 2.
+                Uses adaptive replication: 2 initial passes, then up to 5 for
+                disagreements. Set to 1 for single-pass mode.
+            export_tsv (bool): If True, write three TSV files:
+                ``{export_prefix}_full.tsv`` — complete review table (1 row per match
+                pair, the most comprehensive output).
+                ``{export_prefix}_accepted.tsv`` — grouped accepted matches.
+                ``{export_prefix}_rejected.tsv`` — rejected, human review, and unmatched
+                rows.
+                Default False.
+            export_prefix (str): Filename prefix for exported TSV files. Default "mapping".
 
-        Returns
-        -------
-        dict with keys:
-            df_review : pl.DataFrame
-                One row per match pair with columns: condition_name,
-                search_term, matched_concept_synonym, icd_concept_name,
-                icd_code, icd_version, icd_concept_id, vocabulary_id,
-                standard_concept (bool), match_type ("exact" or "fuzzy"),
-                top_level_code (first 3 chars of icd_code),
-                has_confirmed_sibling (bool — True when a fuzzy match's
-                top-level code also appears in an exact match for the same
-                condition), fuzzy_score, ai_verdict, ai_vote,
-                ai_vote_confidence, ai_comment, ai_comment_consistency,
-                ai_comment_consistency_tier, ai_combined_confidence.
-                Unmatched conditions appear with null ICD columns and
-                ai_verdict="no match".
-            df_accepted : pl.DataFrame
-                Grouped table with max 2 rows per condition (one ICD-9,
-                one ICD-10). Columns: condition_name, icd_version,
-                icd_codes, top_level_codes, icd_concept_names,
-                icd_concept_ids, n_codes. Code columns are comma-separated
-                aggregations of unique values.
-            df_human_review : pl.DataFrame
-                Matches needing manual verification: unreviewed fuzzy
-                matches (no AI verdict) and AI verdicts flagged as
-                "human review" (low confidence).
-            df_rejected : pl.DataFrame
-                Flat table (1 row per pair) where ai_verdict is "reject",
-                "human review", or "no match". Includes top_level_code
-                and has_confirmed_sibling columns.
-            df_unmatched_terms : pl.DataFrame
-                Search terms that found no match (exact or fuzzy).
-                Null ICD columns, ai_verdict="no match". Includes
-                terms from partially-matched conditions.
-            df_unmapped_conditions : pl.DataFrame
-                All rows for conditions with no usable ICD mapping —
-                either zero matches or all matches rejected by AI.
-                Includes both "no match" and "reject" rows for
-                manual investigation.
-            df_term_counts : pl.DataFrame
-                Per-condition matching coverage (total/matched/unmatched terms).
-            df_input, df_exact, df_fuzzy : pl.DataFrame
-                Intermediate DataFrames from the matching pipeline.
+        Returns:
+            dict: Dictionary with keys:
+
+                - ``df_review`` (pl.DataFrame) — One row per match pair with columns:
+                  condition_name, search_term, matched_concept_synonym, icd_concept_name,
+                  icd_code, icd_version, icd_concept_id, vocabulary_id,
+                  standard_concept (bool), match_type ("exact" or "fuzzy"),
+                  top_level_code (first 3 chars of icd_code),
+                  has_confirmed_sibling (bool — True when a fuzzy match's top-level code
+                  also appears in an exact match for the same condition), fuzzy_score,
+                  ai_verdict, ai_vote, ai_vote_confidence, ai_comment,
+                  ai_comment_consistency, ai_comment_consistency_tier,
+                  ai_combined_confidence. Unmatched conditions appear with null ICD
+                  columns and ai_verdict="no match".
+                - ``df_accepted`` (pl.DataFrame) — Grouped table with max 2 rows per
+                  condition (one ICD-9, one ICD-10). Columns: condition_name, icd_version,
+                  icd_codes, top_level_codes, icd_concept_names, icd_concept_ids, n_codes.
+                  Code columns are comma-separated aggregations of unique values.
+                - ``df_human_review`` (pl.DataFrame) — Matches needing manual
+                  verification: unreviewed fuzzy matches (no AI verdict) and AI verdicts
+                  flagged as "human review" (low confidence).
+                - ``df_rejected`` (pl.DataFrame) — Flat table (1 row per pair) where
+                  ai_verdict is "reject", "human review", or "no match". Includes
+                  top_level_code and has_confirmed_sibling columns.
+                - ``df_unmatched_terms`` (pl.DataFrame) — Search terms that found no
+                  match (exact or fuzzy). Null ICD columns, ai_verdict="no match".
+                  Includes terms from partially-matched conditions.
+                - ``df_unmapped_conditions`` (pl.DataFrame) — All rows for conditions
+                  with no usable ICD mapping — either zero matches or all matches rejected
+                  by AI. Includes both "no match" and "reject" rows for manual
+                  investigation.
+                - ``df_term_counts`` (pl.DataFrame) — Per-condition matching coverage
+                  (total/matched/unmatched terms).
+                - ``df_input``, ``df_exact``, ``df_fuzzy`` (pl.DataFrame) — Intermediate
+                  DataFrames from the matching pipeline.
         """
         do_ai_review = ai_review
         if do_ai_review:
@@ -1519,16 +1491,15 @@ class Condition2ICD(ConditionMapperBase):
         4. Joins SNOMED results back to conditions
         5. Detects overlapping SNOMED concepts (shared by 2+ conditions)
 
-        Parameters
-        ----------
-        df_accepted : pl.DataFrame
-            Grouped output from ``map()`` with comma-separated ``icd_codes``.
+        Args:
+            df_accepted (pl.DataFrame): Grouped output from ``map()`` with
+                comma-separated ``icd_codes``.
 
-        Returns
-        -------
-        dict
-            ``df_snomed``   – full condition → SNOMED mapping
-            ``df_overlaps`` – SNOMED concepts shared by 2+ conditions
+        Returns:
+            dict: Dictionary with keys:
+
+                - ``df_snomed`` — full condition → SNOMED mapping
+                - ``df_overlaps`` — SNOMED concepts shared by 2+ conditions
         """
         _empty_snomed = pl.DataFrame(schema={
             "condition_name": pl.Utf8, "source_icd_code": pl.Utf8,
@@ -1795,35 +1766,26 @@ class Condition2ICD(ConditionMapperBase):
         asks the AI whether the mapping is clinically valid or an artifact
         of broad ICD coding. Supports Gemini and Claude with auto-fallback.
 
-        Parameters
-        ----------
-        snomed_results : dict
-            Output of :meth:`icd_to_snomed` containing ``df_snomed``
-            and ``df_overlaps``.
-        ai_provider : str
-            Primary AI provider: ``"gemini"`` or ``"claude"``.
-            Default ``"gemini"``.
-        ai_tier : str, optional
-            Preferred model tier. Auto-resolves per provider if None:
-            Gemini → "pro", Claude → "sonnet".
-        ai_min_version : float, optional
-            Minimum model version. Gemini default 3.0, Claude default 4.6.
-        ai_passes : int
-            Number of independent AI passes. Default 2.
-        export_tsv : bool
-            Export results as TSV files. Default False.
-        export_prefix : str
-            Filename prefix for exported TSVs. Default "snomed_mapping".
+        Args:
+            snomed_results (dict): Output of :meth:`icd_to_snomed` containing
+                ``df_snomed`` and ``df_overlaps``.
+            ai_provider (str): Primary AI provider: ``"gemini"`` or ``"claude"``.
+                Default ``"gemini"``.
+            ai_tier (str, optional): Preferred model tier. Auto-resolves per provider
+                if None: Gemini → "pro", Claude → "sonnet".
+            ai_min_version (float, optional): Minimum model version. Gemini default 3.0,
+                Claude default 4.6.
+            ai_passes (int): Number of independent AI passes. Default 2.
+            export_tsv (bool): Export results as TSV files. Default False.
+            export_prefix (str): Filename prefix for exported TSVs. Default "snomed_mapping".
 
-        Returns
-        -------
-        dict
-            Updated ``snomed_results`` with added keys:
+        Returns:
+            dict: Updated ``snomed_results`` with added keys:
 
-            - ``df_snomed`` — original + ``ai_overlap_verdict`` column
-            - ``df_overlaps`` — unchanged
-            - ``df_reviewed`` — per (snomed, condition) verdicts
-            - ``df_snomed_accepted`` — grouped by condition, AI rejects removed
+                - ``df_snomed`` — original + ``ai_overlap_verdict`` column
+                - ``df_overlaps`` — unchanged
+                - ``df_reviewed`` — per (snomed, condition) verdicts
+                - ``df_snomed_accepted`` — grouped by condition, AI rejects removed
         """
         provider, model = self._resolve_model(
             ai_provider=ai_provider,

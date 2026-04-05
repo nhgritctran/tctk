@@ -94,16 +94,12 @@ def _rtf_to_text(rtf_bytes: bytes) -> str:
 def get_cdc_icd9_index(txt_path: Optional[str | Path] = None) -> Path:
     """Download and cache the CDC ICD-9-CM Disease Index as plain text.
 
-    Parameters
-    ----------
-    txt_path : str or Path, optional
-        Path to a pre-extracted plain-text file.  If provided, the file is
-        used directly (offline mode) — no download is attempted.
+    Args:
+        txt_path (str or Path, optional): Path to a pre-extracted plain-text file. If provided,
+            the file is used directly (offline mode) — no download is attempted.
 
-    Returns
-    -------
-    Path
-        Absolute path to the cached text file.
+    Returns:
+        Path: Absolute path to the cached text file.
     """
     if txt_path is not None:
         return Path(txt_path)
@@ -168,15 +164,12 @@ def get_cdc_icd9_index(txt_path: Optional[str | Path] = None) -> Path:
 class CDCIndex9:
     """Parsed ICD-9-CM Disease Index with instant dict-based lookups.
 
-    Parameters
-    ----------
-    txt_path : str or Path, optional
-        Path to the plain-text disease index.  If None, auto-downloads
-        via ``get_cdc_icd9_index()``.
-    normalize_fn : callable, optional
-        Default normalize function for :meth:`lookup`.  If None, a built-in
-        normalizer is used (lowercase, hyphens→spaces, strip parentheticals,
-        collapse whitespace).
+    Args:
+        txt_path (str or Path, optional): Path to the plain-text disease index. If None,
+            auto-downloads via ``get_cdc_icd9_index()``.
+        normalize_fn (callable, optional): Default normalize function for :meth:`lookup`. If None,
+            a built-in normalizer is used (lowercase, hyphens→spaces, strip parentheticals,
+            collapse whitespace).
     """
 
     def __init__(
@@ -515,17 +508,12 @@ class CDCIndex9:
     ) -> list[dict]:
         """Look up a term in the ICD-9-CM index (exact normalized match).
 
-        Parameters
-        ----------
-        term : str
-            The search term (e.g. "diabetes mellitus").
-        normalize_fn : callable, optional
-            Normalization function.  If None, uses the instance default.
+        Args:
+            term (str): The search term (e.g. "diabetes mellitus").
+            normalize_fn (callable, optional): Normalization function. If None, uses the instance default.
 
-        Returns
-        -------
-        list[dict]
-            Each dict has keys ``"code"`` and ``"name"``.
+        Returns:
+            list[dict]: Each dict has keys ``"code"`` and ``"name"``.
         """
         fn = normalize_fn or self._default_normalize_fn
         norm = fn(term)
@@ -579,24 +567,16 @@ class CDCIndex9:
         stopword stripping, then rapidfuzz ``token_sort_ratio`` for scoring
         — same approach as CDCIndex (ICD-10) and the OMOP vocab fuzzy matching.
 
-        Parameters
-        ----------
-        term : str
-            The search term.
-        threshold : int
-            Minimum fuzzy score (0–100). Default 85.
-        limit : int
-            Max results to return.  Default 5.
-        normalize_fn : callable, optional
-            Normalization function.  If None, uses the instance default.
-        stopwords : set[str], optional
-            Words to strip before fuzzy scoring.  If None, uses the built-in
-            medical stopword set (disease, disorder, syndrome, ...).
+        Args:
+            term (str): The search term.
+            threshold (int): Minimum fuzzy score (0-100). Default 85.
+            limit (int): Max results to return. Default 5.
+            normalize_fn (callable, optional): Normalization function. If None, uses the instance default.
+            stopwords (set[str], optional): Words to strip before fuzzy scoring. If None, uses the built-in
+                medical stopword set (disease, disorder, syndrome, ...).
 
-        Returns
-        -------
-        list[dict]
-            Each dict has ``"code"``, ``"name"``, and ``"score"`` keys,
+        Returns:
+            list[dict]: Each dict has ``"code"``, ``"name"``, and ``"score"`` keys,
             sorted by score descending.
         """
         from rapidfuzz import fuzz, process

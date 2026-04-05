@@ -37,21 +37,16 @@ def plot_condition_coverage(
 ):
     """Horizontal stacked bar chart of per-condition mapping coverage.
 
-    Parameters
-    ----------
-    source : dict | str | Path
-        Either the ``results`` dict returned by ``mapper.map()``, or a file
-        path to the exported full review table (TSV / CSV).
-    figsize : tuple
-        ``(width, height)``.  Height auto-calculated if *None*.
-    title : str, optional
-        Figure title.  Defaults to "Condition Coverage Summary".
-    top_n : int, optional
-        Show only the top *n* conditions by total accepted codes.
+    Args:
+        source (dict | str | Path): Either the ``results`` dict returned by
+            ``mapper.map()``, or a file path to the exported full review
+            table (TSV / CSV).
+        figsize (tuple): ``(width, height)``.  Height auto-calculated if *None*.
+        title (str, optional): Figure title.  Defaults to "Condition Coverage Summary".
+        top_n (int, optional): Show only the top *n* conditions by total accepted codes.
 
-    Returns
-    -------
-    matplotlib.figure.Figure
+    Returns:
+        matplotlib.figure.Figure:
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches

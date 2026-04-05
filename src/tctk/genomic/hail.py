@@ -5,9 +5,13 @@ from tqdm import tqdm
 def scan_interval(locus, radius=10):
     """
     generate variant scan interval around target site
-    :param locus: target locus
-    :param radius: number of bases away from target locus
-    :return: scan interval that can be used by Hail
+
+    Args:
+        locus: target locus
+        radius: number of bases away from target locus
+
+    Returns:
+        scan interval that can be used by Hail
     """
 
     c = locus.split(":")[0]
@@ -20,14 +24,18 @@ def scan_interval(locus, radius=10):
 def find_variant(mt, var_dict, snv=True):
     """
     take a variant dict and scan input matrix table for these variants
-    :param mt: Hail matrix table
-    :param var_dict: variant dict; example:
-    {'SMAD2': ['chr18:47848564:G:C',
-               'chr18:47841885:A:G'],
-     'SMAD3': ['chr15:67165385:G:C',
-               'chr15:67066361:G:C'],
-    :param snv: boolean; determine type variant for appropriate mapping approach
-    :return: matched variant dict and matched matrix table
+
+    Args:
+        mt: Hail matrix table
+        var_dict: variant dict; example:
+            {'SMAD2': ['chr18:47848564:G:C',
+                       'chr18:47841885:A:G'],
+             'SMAD3': ['chr15:67165385:G:C',
+                       'chr15:67066361:G:C']}
+        snv (bool): boolean; determine type variant for appropriate mapping approach
+
+    Returns:
+        tuple: matched variant dict and matched matrix table
     """
 
     # check all ClinVar variants in AoU data and return variants detected and their matrix tables

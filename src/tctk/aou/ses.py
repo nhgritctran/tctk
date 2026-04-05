@@ -51,10 +51,14 @@ class SocioEconomicStatus:
     def dummy_coding(data, col_name, lookup_dict):
         """
         create dummy variables for a categorical variable
-        :param data: polars dataframe
-        :param col_name: variable of interest
-        :param lookup_dict: dict to map dummy variables
-        :return: polars dataframe with new dummy columns
+
+        Args:
+            data: polars dataframe
+            col_name: variable of interest
+            lookup_dict: dict to map dummy variables
+
+        Returns:
+            polars dataframe with new dummy columns
         """
         for k, v in lookup_dict.items():
             data = data.with_columns(pl.when(pl.col(col_name) == k)
@@ -67,8 +71,12 @@ class SocioEconomicStatus:
     def compare_with_median_income(self, data):
         """
         convert area median income to equivalent income bracket and then compare with participant's income bracket
-        :param data:
-        :return:
+
+        Args:
+            data: input polars dataframe
+
+        Returns:
+            polars dataframe with median income bracket and comparison column
         """
         ses_data = self.aou_ses[["PERSON_ID", "ZIP3_AS_STRING", "MEDIAN_INCOME"]]
 
@@ -127,8 +135,12 @@ class SocioEconomicStatus:
     def parse_survey_data(self, smoking=False):  # smoking status will reduce the survey count, hence the option instead
         """
         get survey data of certain questions
-        :param smoking: defaults to False; if true, data on smoking frequency is added
-        :return: polars dataframe with coded answers
+
+        Args:
+            smoking (bool): defaults to False; if true, data on smoking frequency is added
+
+        Returns:
+            polars dataframe with coded answers
         """
         if smoking:
             self.question_id_dict["smoking_frequency"] = 1585860

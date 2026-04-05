@@ -45,13 +45,10 @@ class Condition2SNOMED(ConditionMapperBase):
     Uses a local DuckDB vocabulary database built from Athena CSV files.
     No network access required for mapping — only for optional AI review.
 
-    Parameters
-    ----------
-    vocab_db : str, optional
-        Path to the DuckDB vocabulary database.
-        Default: auto-downloaded from Hugging Face
-    force_download_db : bool
-        Force re-download of the vocabulary database. Default False.
+    Args:
+        vocab_db (str, optional): Path to the DuckDB vocabulary database.
+            Default: auto-downloaded from Hugging Face
+        force_download_db (bool): Force re-download of the vocabulary database. Default False.
     """
 
     _TARGET_ID_COL = "snomed_concept_id"
@@ -374,67 +371,55 @@ class Condition2SNOMED(ConditionMapperBase):
     ) -> dict:
         """Map condition names and their synonyms to OMOP Standard SNOMED Concept IDs.
 
-        Parameters
-        ----------
-        conditions : dict[str, list[str]]
-            Keys are condition names; values are lists of condition synonyms.
-        fuzzy_threshold : int
-            Minimum score (0-100) for rapidfuzz token_sort_ratio. Default 85.
-        ai_review : bool
-            If True, run AI review of fuzzy matches via Gemini API.
-            Default False.
-        gemini_api_key : str, optional
-            Gemini API key for AI review. Falls back to key set via
-            :meth:`set_api_key`, then env var, then config file.
-        ai_tier : str
-            Preferred Gemini model tier: "pro", "flash", or "flash-lite".
-            Default "flash".
-        ai_min_version : float
-            Minimum Gemini model version. Default 3.0 (prefer Gemini 3.x+).
-            Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
-        config_path : str, optional
-            Path to JSON config file for API key.
-        ai_batch_size : int, optional
-            Conditions per AI review API call. If None, auto-calculated.
-        ai_passes : int
-            Number of initial AI review passes. Default 2.
-            Uses adaptive replication: 2 initial passes, then up to 5
-            for disagreements. Set to 1 for single-pass mode.
-        export_tsv : bool
-            If True, write five TSV files:
-            ``{export_prefix}_full.tsv`` — all matched term pairs with
-            scores, enrichment, and AI review columns (plus "no match" rows).
-            ``{export_prefix}_accepted.tsv`` — one row per condition,
-            aggregating only passed matches (not AI-rejected).
-            ``{export_prefix}_rejected.tsv`` — rejected / human review /
-            no-match rows.
-            ``{export_prefix}_unmatched_terms.tsv`` — search terms with
-            zero matches.
-            ``{export_prefix}_unmapped_conditions.tsv`` — conditions with
-            no usable SNOMED mapping.
-            Default False.
-        export_prefix : str
-            Filename prefix for exported TSV files. Default "mapping".
+        Args:
+            conditions (dict[str, list[str]]): Keys are condition names; values are
+                lists of condition synonyms.
+            fuzzy_threshold (int): Minimum score (0-100) for rapidfuzz token_sort_ratio.
+                Default 85.
+            ai_review (bool): If True, run AI review of fuzzy matches via Gemini API.
+                Default False.
+            gemini_api_key (str, optional): Gemini API key for AI review. Falls back to
+                key set via :meth:`set_api_key`, then env var, then config file.
+            ai_tier (str): Preferred Gemini model tier: "pro", "flash", or "flash-lite".
+                Default "flash".
+            ai_min_version (float): Minimum Gemini model version. Default 3.0 (prefer
+                Gemini 3.x+). Set to 2.5 to allow older models (e.g. gemini-2.5-flash).
+            config_path (str, optional): Path to JSON config file for API key.
+            ai_batch_size (int, optional): Conditions per AI review API call. If None,
+                auto-calculated.
+            ai_passes (int): Number of initial AI review passes. Default 2.
+                Uses adaptive replication: 2 initial passes, then up to 5
+                for disagreements. Set to 1 for single-pass mode.
+            export_tsv (bool): If True, write five TSV files:
+                ``{export_prefix}_full.tsv`` — all matched term pairs with
+                scores, enrichment, and AI review columns (plus "no match" rows).
+                ``{export_prefix}_accepted.tsv`` — one row per condition,
+                aggregating only passed matches (not AI-rejected).
+                ``{export_prefix}_rejected.tsv`` — rejected / human review /
+                no-match rows.
+                ``{export_prefix}_unmatched_terms.tsv`` — search terms with
+                zero matches.
+                ``{export_prefix}_unmapped_conditions.tsv`` — conditions with
+                no usable SNOMED mapping.
+                Default False.
+            export_prefix (str): Filename prefix for exported TSV files. Default "mapping".
 
-        Returns
-        -------
-        dict with keys:
-            df_review : pl.DataFrame
-                All matched (search_term, concept) pairs plus "no match"
-                rows, with scores, ancestor distances, and AI review columns.
-            df_accepted : pl.DataFrame
-                One row per condition, codes aggregated from passed matches
-                only (ai_verdict != "reject").
-            df_rejected : pl.DataFrame
-                Rows with ai_verdict in ("reject", "human review", "no match").
-            df_unmatched_terms : pl.DataFrame
-                Search terms with zero matches.
-            df_unmapped_conditions : pl.DataFrame
-                Conditions with no usable SNOMED mapping.
-            df_term_counts : pl.DataFrame
-                Per-condition matching coverage (total/matched/unmatched terms).
-            df_input, df_exact, df_fuzzy : pl.DataFrame
-                Intermediate DataFrames from the matching pipeline.
+        Returns:
+            dict: Dictionary with keys:
+
+                - ``df_review`` (pl.DataFrame) — All matched (search_term, concept) pairs
+                  plus "no match" rows, with scores, ancestor distances, and AI review columns.
+                - ``df_accepted`` (pl.DataFrame) — One row per condition, codes aggregated
+                  from passed matches only (ai_verdict != "reject").
+                - ``df_rejected`` (pl.DataFrame) — Rows with ai_verdict in
+                  ("reject", "human review", "no match").
+                - ``df_unmatched_terms`` (pl.DataFrame) — Search terms with zero matches.
+                - ``df_unmapped_conditions`` (pl.DataFrame) — Conditions with no usable
+                  SNOMED mapping.
+                - ``df_term_counts`` (pl.DataFrame) — Per-condition matching coverage
+                  (total/matched/unmatched terms).
+                - ``df_input``, ``df_exact``, ``df_fuzzy`` (pl.DataFrame) — Intermediate
+                  DataFrames from the matching pipeline.
         """
         do_ai_review = ai_review
         if do_ai_review:

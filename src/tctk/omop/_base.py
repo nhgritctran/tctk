@@ -47,13 +47,10 @@ class ConditionMapperBase:
     Provides input normalization, exact/fuzzy matching against a local
     DuckDB vocabulary database, ranking, and AI review infrastructure.
 
-    Parameters
-    ----------
-    vocab_db : str, optional
-        Path to the DuckDB vocabulary database.
-        Default: auto-downloaded from Hugging Face
-    force_download_db : bool
-        Force re-download of the vocabulary database. Default False.
+    Args:
+        vocab_db (str, optional): Path to the DuckDB vocabulary database.
+            Default: auto-downloaded from Hugging Face
+        force_download_db (bool): Force re-download of the vocabulary database. Default False.
     """
 
     BATCH_SIZE = 500
@@ -125,17 +122,14 @@ class ConditionMapperBase:
     ) -> None:
         """Set API keys for AI review.
 
-        Parameters
-        ----------
-        key : str, optional
-            Gemini API key string directly.
-        key_file : str, optional
-            Path to a JSON file containing ``{"gemini_api_key": "..."}``.
-            May also contain ``{"anthropic_api_key": "..."}`` for Claude.
-        claude_key : str, optional
-            Claude (Anthropic) API key string directly.
-        claude_key_file : str, optional
-            Path to a JSON file containing ``{"anthropic_api_key": "..."}``.
+        Args:
+            key (str, optional): Gemini API key string directly.
+            key_file (str, optional): Path to a JSON file containing
+                ``{"gemini_api_key": "..."}``. May also contain
+                ``{"anthropic_api_key": "..."}`` for Claude.
+            claude_key (str, optional): Claude (Anthropic) API key string directly.
+            claude_key_file (str, optional): Path to a JSON file containing
+                ``{"anthropic_api_key": "..."}``.
         """
         # --- Gemini key ---
         if key:

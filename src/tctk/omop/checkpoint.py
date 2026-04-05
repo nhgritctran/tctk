@@ -33,18 +33,13 @@ _META_FILE = "_meta.json"
 def save_results(results: dict, path: str | Path) -> Path:
     """Save mapping results to a directory.
 
-    Parameters
-    ----------
-    results : dict
-        The dict returned by ``Condition2ICD.map()`` or
-        ``Condition2SNOMED.map()``.
-    path : str or Path
-        Directory to create.  Parent directories are created as needed.
+    Args:
+        results (dict): The dict returned by ``Condition2ICD.map()`` or
+            ``Condition2SNOMED.map()``.
+        path (str or Path): Directory to create.  Parent directories are created as needed.
 
-    Returns
-    -------
-    Path
-        The directory path (for chaining / display).
+    Returns:
+        Path: The directory path (for chaining / display).
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -81,15 +76,11 @@ def save_results(results: dict, path: str | Path) -> Path:
 def load_results(path: str | Path) -> dict:
     """Load mapping results from a checkpoint directory.
 
-    Parameters
-    ----------
-    path : str or Path
-        Directory previously created by :func:`save_results`.
+    Args:
+        path (str or Path): Directory previously created by :func:`save_results`.
 
-    Returns
-    -------
-    dict
-        Same structure as the original ``map()`` return value.
+    Returns:
+        dict: Same structure as the original ``map()`` return value.
     """
     path = Path(path)
     meta_path = path / _META_FILE
@@ -120,10 +111,8 @@ def print_summary(results: dict) -> None:
     Works with both live results (from ``map()``) and loaded checkpoints
     (from ``load_results()``).
 
-    Parameters
-    ----------
-    results : dict
-        The results dict (must contain ``_run_log`` key).
+    Args:
+        results (dict): The results dict (must contain ``_run_log`` key).
     """
     log = results.get("_run_log")
     if log is None:

@@ -99,8 +99,8 @@ class Dsub:
         flags, environment variables, or script commands. Useful for creating
         custom dsub commands or testing.
 
-        :return: Base dsub command with provider, machine, networking, and logging configuration
-        :rtype: str
+        Returns:
+            str: Base dsub command with provider, machine, networking, and logging configuration
         """
         if self.use_aou_docker_prefix:
             aou_docker_prefix = os.getenv("ARTIFACT_REGISTRY_DOCKER_REPO")
@@ -134,12 +134,12 @@ class Dsub:
         """
         Merge custom arguments with base command, allowing custom args to override existing ones.
 
-        :param base_command: The base command string
-        :type base_command: str
-        :param custom_args: Custom arguments that may override existing ones
-        :type custom_args: str
-        :return: Merged command string with custom args taking precedence
-        :rtype: str
+        Args:
+            base_command (str): The base command string
+            custom_args (str): Custom arguments that may override existing ones
+
+        Returns:
+            str: Merged command string with custom args taking precedence
         """
         import re
 
@@ -175,8 +175,8 @@ class Dsub:
         """
         Generate the dsub command script with all configured parameters.
 
-        :return: Complete dsub command as a string
-        :rtype: str
+        Returns:
+            str: Complete dsub command as a string
         """
         # Get base script
         base_script = self.dsub_base_script()
@@ -231,8 +231,11 @@ class Dsub:
         """
         Check job status from dstat output and identify terminal states.
 
-        :param stdout: Output from dstat command
-        :return: Tuple of (status_value, has_success, has_failed, has_canceled, last_update, status_detail)
+        Args:
+            stdout (str): Output from dstat command
+
+        Returns:
+            tuple: Tuple of (status_value, has_success, has_failed, has_canceled, last_update, status_detail)
         """
         status_value = ""
         has_success = False
@@ -287,13 +290,14 @@ class Dsub:
         """
         Check the status of the submitted job using dstat command.
 
-        :param full: Whether to show full detailed status information
-        :param custom_args: Additional custom arguments for dstat command
-        :param streaming: Whether to continuously monitor status with auto-refresh
-        :param update_interval: Seconds between status updates when streaming
-        :param verbose: Whether to print debug information for status detection
-        :param auto_job_cleanup: Whether to automatically cleanup job after completion or failure
-        :param cleanup_delay: Seconds to wait after completion/failure before cleaning up job
+        Args:
+            full (bool): Whether to show full detailed status information
+            custom_args (str): Additional custom arguments for dstat command
+            streaming (bool): Whether to continuously monitor status with auto-refresh
+            update_interval (int): Seconds between status updates when streaming
+            verbose (bool): Whether to print debug information for status detection
+            auto_job_cleanup (bool): Whether to automatically cleanup job after completion or failure
+            cleanup_delay (int): Seconds to wait after completion/failure before cleaning up job
         """
 
         # base command
@@ -569,14 +573,11 @@ class Dsub:
         Useful for testing dsub setup, authentication, and basic job execution
         without running complex scripts.
 
-        :param stream_status: Whether to automatically stream status after submission
-        :type stream_status: bool
-        :param update_interval: Seconds between status updates when streaming
-        :type update_interval: int
-        :param use_private_address: Whether to use private IP addresses
-        :type use_private_address: bool
-        :param custom_args: Additional custom arguments for dsub command
-        :type custom_args: str | None
+        Args:
+            stream_status (bool): Whether to automatically stream status after submission
+            update_interval (int): Seconds between status updates when streaming
+            use_private_address (bool): Whether to use private IP addresses
+            custom_args (str, optional): Additional custom arguments for dsub command. Defaults to None.
         """
         # Get base script and add command
         test_command = self.dsub_base_script() + " --command 'echo Hello'"

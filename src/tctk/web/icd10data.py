@@ -68,16 +68,13 @@ class ICD10DataLookup:
 
     def __init__(self, delay: float = 0.5, max_workers: int = 4):
         """
-        Parameters
-        ----------
-        delay : float
-            Minimum seconds between HTTP requests (global, across all
-            threads).  Default 0.5 (~2 req/s).
-        max_workers : int
-            Maximum number of concurrent threads for batch operations.
-            Default 4.  Threading overlaps network I/O wait time while
-            the global rate limiter ensures total request rate stays at
-            ~1/delay req/s.
+        Args:
+            delay (float): Minimum seconds between HTTP requests (global, across all
+                threads). Default 0.5 (~2 req/s).
+            max_workers (int): Maximum number of concurrent threads for batch operations.
+                Default 4. Threading overlaps network I/O wait time while
+                the global rate limiter ensures total request rate stays at
+                ~1/delay req/s.
         """
         self._delay = delay
         self._max_workers = max_workers
@@ -112,17 +109,12 @@ class ICD10DataLookup:
     def search(self, query: str, max_results: int = 25) -> pl.DataFrame:
         """Search icd10data.com for ICD-10-CM codes matching *query*.
 
-        Parameters
-        ----------
-        query : str
-            Free-text condition name to search.
-        max_results : int
-            Maximum number of results to return.  Default 25.
+        Args:
+            query (str): Free-text condition name to search.
+            max_results (int): Maximum number of results to return. Default 25.
 
-        Returns
-        -------
-        pl.DataFrame
-            Columns: ``code``, ``name``, ``synonyms``, ``url``.
+        Returns:
+            pl.DataFrame: Columns: ``code``, ``name``, ``synonyms``, ``url``.
         """
         url = f"{self.BASE}/search"
         params = {"s": query}
@@ -202,15 +194,11 @@ class ICD10DataLookup:
     def fetch_code(self, code_or_url: str) -> dict:
         """Fetch detail page for an ICD-10-CM code.
 
-        Parameters
-        ----------
-        code_or_url : str
-            Either a bare ICD-10 code (e.g. ``"H16.32"``) or a full URL.
+        Args:
+            code_or_url (str): Either a bare ICD-10 code (e.g. ``"H16.32"``) or a full URL.
 
-        Returns
-        -------
-        dict
-            Keys: ``code``, ``name``, ``applicable_to``, ``approximate_synonyms``.
+        Returns:
+            dict: Keys: ``code``, ``name``, ``applicable_to``, ``approximate_synonyms``.
         """
         if code_or_url.startswith("http") or code_or_url.startswith("/"):
             url = code_or_url
@@ -330,15 +318,11 @@ class ICD10DataLookup:
         Returns a dict mapping code → {applicable_to: [...], approximate_synonyms: [...]}.
         Caches results internally to avoid refetching the same code twice.
 
-        Parameters
-        ----------
-        codes : list[str]
-            ICD-10-CM codes to look up (e.g. ``["H16.32", "M35.0"]``).
+        Args:
+            codes (list[str]): ICD-10-CM codes to look up (e.g. ``["H16.32", "M35.0"]``).
 
-        Returns
-        -------
-        dict[str, dict]
-            Mapping of code → ``{"applicable_to": [...], "approximate_synonyms": [...]}``.
+        Returns:
+            dict[str, dict]: Mapping of code → ``{"applicable_to": [...], "approximate_synonyms": [...]}``.
         """
         if not hasattr(self, "_code_cache"):
             self._code_cache: dict[str, dict] = {}
@@ -390,24 +374,16 @@ class ICD10DataLookup:
     ) -> dict:
         """Batch lookup: search icd10data.com for each condition and match results.
 
-        Parameters
-        ----------
-        conditions : dict[str, list[str]]
-            Keys are condition names; values are lists of synonyms.
-        fuzzy_threshold : int
-            Minimum rapidfuzz score (0-100) for matching.  Default 85.
-        fetch_details : bool
-            If True, also fetch code detail pages for "Applicable To" data.
-            Slower due to extra HTTP requests.  Default False.
-        export_tsv : bool
-            If True, write results to ``{export_prefix}_results.tsv``.
-        export_prefix : str
-            Filename prefix for exported files.  Default ``"icd10data_lookup"``.
+        Args:
+            conditions (dict[str, list[str]]): Keys are condition names; values are lists of synonyms.
+            fuzzy_threshold (int): Minimum rapidfuzz score (0-100) for matching. Default 85.
+            fetch_details (bool): If True, also fetch code detail pages for "Applicable To" data.
+                Slower due to extra HTTP requests. Default False.
+            export_tsv (bool): If True, write results to ``{export_prefix}_results.tsv``.
+            export_prefix (str): Filename prefix for exported files. Default ``"icd10data_lookup"``.
 
-        Returns
-        -------
-        dict
-            Keys: ``df_results`` (pl.DataFrame with columns: condition_name,
+        Returns:
+            dict: Keys: ``df_results`` (pl.DataFrame with columns: condition_name,
             search_term, icd_code, icd_name, match_source, match_score).
         """
         all_rows = []
