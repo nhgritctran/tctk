@@ -1,7 +1,9 @@
 dsub
 duckdb
+google-cloud-batch
 google-cloud-bigquery
 polars
+pyyaml
 pyarrow
 python-dateutil
 rapidfuzz

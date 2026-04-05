@@ -14,11 +14,13 @@ urls = { Homepage = "https://github.com/nhgritctran/tctk" }
 dependencies = [
     "connectorx",
     "duckdb",
+    "google-cloud-batch",
     "google-cloud-bigquery",
     "google-genai",
     "huggingface_hub",
     "matplotlib>=3.5",
     "polars",
+    "pyyaml",
     "pyarrow",
     "rapidfuzz",
     "striprtf",
