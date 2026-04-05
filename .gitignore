@@ -180,4 +180,4 @@ devnotebooks/
 
 # Claude Code project instructions
 CLAUDE.md
-.claude/rules/
+.claude
