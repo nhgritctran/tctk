@@ -994,3 +994,399 @@ class TestIsRescued:
             "is_rescued": [False, False],
         })
         assert df["is_rescued"].sum() == 0
+
+
+# ===================================================================
+# review_snomed_mappings
+# ===================================================================
+
+def _make_snomed_results(pairs, overlap_verdicts=None):
+    """Build a minimal snomed_results dict from synthetic data.
+
+    Parameters
+    ----------
+    pairs : list[dict]
+        Each dict has keys: snomed_concept_id, snomed_code, snomed_name,
+        condition_name, icd_code.
+    overlap_verdicts : dict, optional
+        Mapping of (snomed_concept_id, condition_name) -> verdict string
+        (e.g. "keep", "remove").  Adds ``ai_overlap_verdict`` column.
+    """
+    rows = []
+    for p in pairs:
+        rows.append({
+            "snomed_concept_id": p["snomed_concept_id"],
+            "snomed_code": p["snomed_code"],
+            "snomed_name": p["snomed_name"],
+            "condition_name": p["condition_name"],
+            "icd_code": p["icd_code"],
+        })
+    df = pl.DataFrame(rows, schema={
+        "snomed_concept_id": pl.Int64,
+        "snomed_code": pl.Utf8,
+        "snomed_name": pl.Utf8,
+        "condition_name": pl.Utf8,
+        "icd_code": pl.Utf8,
+    })
+
+    if overlap_verdicts is not None:
+        verdicts = []
+        for row in df.iter_rows(named=True):
+            key = (row["snomed_concept_id"], row["condition_name"])
+            verdicts.append(overlap_verdicts.get(key))
+        df = df.with_columns(
+            pl.Series("ai_overlap_verdict", verdicts, dtype=pl.Utf8)
+        )
+
+    return {"df_snomed": df}
+
+
+def _fake_ai_response(verdicts):
+    """Build a JSON string mimicking AI response."""
+    import json
+    return json.dumps({"verdicts": verdicts})
+
+
+class TestReviewSnomedMappings:
+    """Test review_snomed_mappings method with monkeypatched AI."""
+
+    @staticmethod
+    def _make_mapper(monkeypatch, ai_verdicts):
+        """Create a Condition2ICD with mocked AI calls.
+
+        ai_verdicts : list[dict]
+            Each dict is a verdict: {snomed_id, condition, v, comment}.
+            The same verdicts are returned for every AI call.
+        """
+        mapper = Condition2ICD.__new__(Condition2ICD)
+        mapper._api_key = "fake"
+        mapper._claude_api_key = None
+        mapper._gemini_model = None
+        mapper._claude_model = None
+        mapper._TARGET_LINES_PER_BATCH = 150
+
+        monkeypatch.setattr(
+            mapper, "_resolve_model",
+            lambda **kw: ("gemini", "gemini-test"),
+        )
+        monkeypatch.setattr(
+            mapper, "_call_ai",
+            lambda *a, **kw: _fake_ai_response(ai_verdicts),
+        )
+        return mapper
+
+    # --- basic verdicts ---
+
+    def test_accept_verdict(self, monkeypatch):
+        """AI returns accept — all concepts in df_snomed_accepted."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Fibromyalgia", "condition_name": "Fibromyalgia",
+             "icd_code": "M79.7"},
+        ]
+        verdicts = [{"snomed_id": "100", "condition": "Fibromyalgia",
+                      "v": "accept", "comment": "exact match"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+        result = mapper.review_snomed_mappings(_make_snomed_results(pairs))
+
+        df_mr = result["df_mapping_reviewed"]
+        assert len(df_mr) == 1
+        assert df_mr["ai_verdict"][0] == "accept"
+
+        # Should appear in df_snomed_accepted
+        accepted_ids = result["df_snomed_accepted"]["snomed_concept_ids"][0]
+        assert "100" in accepted_ids
+
+        # ai_mapping_verdict joined onto df_snomed
+        assert "ai_mapping_verdict" in result["df_snomed"].columns
+        assert result["df_snomed"]["ai_mapping_verdict"][0] == "accept"
+
+    def test_reject_verdict(self, monkeypatch):
+        """AI returns reject — excluded from df_snomed_accepted."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Fibromyalgia", "condition_name": "Fibromyalgia",
+             "icd_code": "M79.7"},
+            {"snomed_concept_id": 200, "snomed_code": "200200",
+             "snomed_name": "Disorder of muscle",
+             "condition_name": "Fibromyalgia", "icd_code": "M79.7"},
+        ]
+        verdicts = [
+            {"snomed_id": "100", "condition": "Fibromyalgia",
+             "v": "accept", "comment": "exact match"},
+            {"snomed_id": "200", "condition": "Fibromyalgia",
+             "v": "reject", "comment": "generic anatomy"},
+        ]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+        result = mapper.review_snomed_mappings(_make_snomed_results(pairs))
+
+        accepted_ids = result["df_snomed_accepted"]["snomed_concept_ids"][0]
+        assert "100" in accepted_ids
+        assert "200" not in accepted_ids
+
+    def test_human_review_verdict(self, monkeypatch):
+        """human_review pairs are kept in df_snomed_accepted."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        verdicts = [{"snomed_id": "100", "condition": "Cond A",
+                      "v": "human_review", "comment": "uncertain"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+        result = mapper.review_snomed_mappings(_make_snomed_results(pairs))
+
+        # human_review should not be excluded
+        assert len(result["df_snomed_accepted"]) == 1
+
+    # --- consensus ---
+
+    def test_consensus_agreement(self, monkeypatch):
+        """2/2 agree → strong confidence."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        verdicts = [{"snomed_id": "100", "condition": "Cond A",
+                      "v": "accept", "comment": "exact match"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+        result = mapper.review_snomed_mappings(
+            _make_snomed_results(pairs), ai_passes=2,
+        )
+
+        df_mr = result["df_mapping_reviewed"]
+        assert df_mr["ai_vote_confidence"][0] == "strong"
+        assert df_mr["ai_vote"][0] == "2/2"
+
+    def test_consensus_disagreement(self, monkeypatch):
+        """Passes disagree → defaults to human_review, weak confidence."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        # Return alternating verdicts per call
+        call_count = {"n": 0}
+        responses = [
+            [{"snomed_id": "100", "condition": "Cond A",
+              "v": "accept", "comment": "yes"}],
+            [{"snomed_id": "100", "condition": "Cond A",
+              "v": "reject", "comment": "no"}],
+        ]
+
+        mapper = Condition2ICD.__new__(Condition2ICD)
+        mapper._api_key = "fake"
+        mapper._claude_api_key = None
+        mapper._gemini_model = None
+        mapper._claude_model = None
+        mapper._TARGET_LINES_PER_BATCH = 150
+
+        monkeypatch.setattr(
+            mapper, "_resolve_model",
+            lambda **kw: ("gemini", "gemini-test"),
+        )
+
+        def alternating_ai(*a, **kw):
+            idx = call_count["n"]
+            call_count["n"] += 1
+            return _fake_ai_response(responses[idx % len(responses)])
+
+        monkeypatch.setattr(mapper, "_call_ai", alternating_ai)
+
+        result = mapper.review_snomed_mappings(
+            _make_snomed_results(pairs), ai_passes=2,
+        )
+
+        df_mr = result["df_mapping_reviewed"]
+        assert df_mr["ai_verdict"][0] == "human_review"
+        assert df_mr["ai_vote_confidence"][0] == "weak"
+
+    # --- overlap-rejected skip ---
+
+    def test_skip_overlap_rejected(self, monkeypatch):
+        """Pairs with ai_overlap_verdict=='remove' not sent to AI."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+            {"snomed_concept_id": 200, "snomed_code": "200200",
+             "snomed_name": "Concept B", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        overlap_verdicts = {(200, "Cond A"): "remove"}
+
+        verdicts = [{"snomed_id": "100", "condition": "Cond A",
+                      "v": "accept", "comment": "ok"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+
+        result = mapper.review_snomed_mappings(
+            _make_snomed_results(pairs, overlap_verdicts=overlap_verdicts),
+        )
+
+        df_mr = result["df_mapping_reviewed"]
+        reviewed_ids = df_mr["snomed_concept_id"].to_list()
+        assert 100 in reviewed_ids
+        assert 200 not in reviewed_ids
+
+    # --- caching ---
+
+    def test_caching_skip(self, monkeypatch, tmp_path):
+        """Second call with same cache_dir skips cached pairs."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        verdicts = [{"snomed_id": "100", "condition": "Cond A",
+                      "v": "accept", "comment": "ok"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+        cache = str(tmp_path / "cache")
+
+        # First call — should call AI and save cache
+        result1 = mapper.review_snomed_mappings(
+            _make_snomed_results(pairs), cache_dir=cache,
+        )
+        assert len(result1["df_mapping_reviewed"]) == 1
+
+        # Track whether AI is called on second run
+        ai_called = {"called": False}
+        original_call = mapper._call_ai
+
+        def tracking_call(*a, **kw):
+            ai_called["called"] = True
+            return original_call(*a, **kw)
+
+        monkeypatch.setattr(mapper, "_call_ai", tracking_call)
+
+        # Second call — should use cache, no AI call
+        result2 = mapper.review_snomed_mappings(
+            _make_snomed_results(pairs), cache_dir=cache,
+        )
+        assert not ai_called["called"]
+        assert len(result2["df_mapping_reviewed"]) == 1
+
+    def test_caching_merge(self, monkeypatch, tmp_path):
+        """Cached + new pairs combined in output."""
+        pairs1 = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        verdicts1 = [{"snomed_id": "100", "condition": "Cond A",
+                       "v": "accept", "comment": "ok"}]
+        mapper = self._make_mapper(monkeypatch, verdicts1)
+        cache = str(tmp_path / "cache")
+
+        mapper.review_snomed_mappings(
+            _make_snomed_results(pairs1), cache_dir=cache,
+        )
+
+        # Now add a new pair
+        pairs2 = pairs1 + [
+            {"snomed_concept_id": 200, "snomed_code": "200200",
+             "snomed_name": "Concept B", "condition_name": "Cond B",
+             "icd_code": "E11"},
+        ]
+        verdicts2 = [{"snomed_id": "200", "condition": "Cond B",
+                       "v": "reject", "comment": "unrelated"}]
+        mapper2 = self._make_mapper(monkeypatch, verdicts2)
+
+        result = mapper2.review_snomed_mappings(
+            _make_snomed_results(pairs2), cache_dir=cache,
+        )
+
+        df_mr = result["df_mapping_reviewed"]
+        assert len(df_mr) == 2
+        ids = set(df_mr["snomed_concept_id"].to_list())
+        assert ids == {100, 200}
+
+    # --- export ---
+
+    def test_export_tsv(self, monkeypatch, tmp_path):
+        """Files created when export_tsv=True."""
+        import os
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        verdicts = [{"snomed_id": "100", "condition": "Cond A",
+                      "v": "accept", "comment": "ok"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+        prefix = str(tmp_path / "test_export")
+
+        mapper.review_snomed_mappings(
+            _make_snomed_results(pairs),
+            export_tsv=True, export_prefix=prefix,
+        )
+
+        assert os.path.exists(f"{prefix}_snomed_full.tsv")
+        assert os.path.exists(f"{prefix}_snomed_accepted.tsv")
+        assert os.path.exists(f"{prefix}_snomed_mapping_reviewed.tsv")
+
+    # --- integration ---
+
+    def test_integration_both_reviews(self, monkeypatch):
+        """Both reviews run, df_snomed_accepted reflects both."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+            {"snomed_concept_id": 200, "snomed_code": "200200",
+             "snomed_name": "Concept B", "condition_name": "Cond A",
+             "icd_code": "E10"},
+            {"snomed_concept_id": 300, "snomed_code": "300300",
+             "snomed_name": "Concept C", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        # Overlap review already removed 200
+        overlap_verdicts = {(200, "Cond A"): "remove"}
+
+        # Mapping review rejects 300
+        verdicts = [
+            {"snomed_id": "100", "condition": "Cond A",
+             "v": "accept", "comment": "ok"},
+            {"snomed_id": "300", "condition": "Cond A",
+             "v": "reject", "comment": "generic"},
+        ]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+
+        result = mapper.review_snomed_mappings(
+            _make_snomed_results(pairs, overlap_verdicts=overlap_verdicts),
+        )
+
+        # Only 100 should survive both reviews
+        accepted_ids = result["df_snomed_accepted"]["snomed_concept_ids"][0]
+        assert "100" in accepted_ids
+        assert "200" not in accepted_ids
+        assert "300" not in accepted_ids
+
+    # --- edge cases ---
+
+    def test_empty_snomed(self, monkeypatch):
+        """Graceful handling of empty input."""
+        mapper = self._make_mapper(monkeypatch, [])
+        result = mapper.review_snomed_mappings(_make_snomed_results([]))
+
+        assert "df_mapping_reviewed" in result
+        assert len(result["df_mapping_reviewed"]) == 0
+
+    def test_no_overlap_column(self, monkeypatch):
+        """Works without prior overlap review (no ai_overlap_verdict col)."""
+        pairs = [
+            {"snomed_concept_id": 100, "snomed_code": "100100",
+             "snomed_name": "Concept A", "condition_name": "Cond A",
+             "icd_code": "E10"},
+        ]
+        verdicts = [{"snomed_id": "100", "condition": "Cond A",
+                      "v": "accept", "comment": "ok"}]
+        mapper = self._make_mapper(monkeypatch, verdicts)
+
+        # _make_snomed_results with no overlap_verdicts → no column
+        snomed_results = _make_snomed_results(pairs)
+        assert "ai_overlap_verdict" not in snomed_results["df_snomed"].columns
+
+        result = mapper.review_snomed_mappings(snomed_results)
+        assert len(result["df_mapping_reviewed"]) == 1
+        assert result["df_mapping_reviewed"]["ai_verdict"][0] == "accept"

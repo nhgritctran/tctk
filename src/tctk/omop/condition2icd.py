@@ -2175,3 +2175,508 @@ class Condition2ICD(ConditionMapperBase):
                        f"({len(df_reviewed)} overlap pairs)")
 
         return snomed_results
+
+    # -------------------------------------------------------------------
+    # AI review of ALL SNOMED mappings
+    # -------------------------------------------------------------------
+
+    def review_snomed_mappings(
+        self,
+        snomed_results: dict,
+        ai_provider: str = "gemini",
+        ai_tier: Optional[str] = None,
+        ai_min_version: Optional[float] = None,
+        ai_passes: int = 2,
+        cache_dir: Optional[str] = None,
+        export_tsv: bool = False,
+        export_prefix: str = "snomed_mapping",
+    ) -> dict:
+        """AI review of every (condition, SNOMED concept) mapping.
+
+        Unlike :meth:`review_snomed_overlaps` which only reviews concepts
+        shared by 2+ conditions, this method reviews ALL mappings to catch
+        generic/unrelated concepts that slipped through overlap review.
+
+        Args:
+            snomed_results (dict): Output of :meth:`icd_to_snomed` (or
+                :meth:`review_snomed_overlaps`) containing ``df_snomed``.
+            ai_provider (str): Primary AI provider: ``"gemini"`` or ``"claude"``.
+                Default ``"gemini"``.
+            ai_tier (str, optional): Preferred model tier. Auto-resolves per
+                provider if None.
+            ai_min_version (float, optional): Minimum model version.
+            ai_passes (int): Number of independent AI passes. Default 2.
+            cache_dir (str, optional): Directory for Parquet cache.  When set,
+                previously reviewed pairs are loaded from cache and skipped.
+            export_tsv (bool): Export results as TSV files. Default False.
+            export_prefix (str): Filename prefix for exported TSVs.
+
+        Returns:
+            dict: Updated ``snomed_results`` with added/updated keys:
+
+                - ``df_snomed`` — original + ``ai_mapping_verdict`` column
+                - ``df_mapping_reviewed`` — per (snomed, condition) verdicts
+                - ``df_snomed_accepted`` — updated to exclude rejects from
+                  both overlap and mapping reviews
+        """
+        from pathlib import Path
+
+        provider, model = self._resolve_model(
+            ai_provider=ai_provider,
+            ai_tier=ai_tier, ai_min_version=ai_min_version,
+        )
+
+        df_snomed = snomed_results["df_snomed"]
+
+        # ── Step 1: Build all (condition, SNOMED) pairs ───────────────
+        df_all_pairs = (
+            df_snomed
+            .group_by("snomed_concept_id", "snomed_code", "snomed_name",
+                       "condition_name")
+            .agg(
+                pl.col("icd_code").unique().sort()
+                    .str.concat(", ").alias("icd_codes"),
+            )
+        )
+
+        # ── Step 2: Skip overlap-rejected pairs ──────────────────────
+        if "ai_overlap_verdict" in df_snomed.columns:
+            df_overlap_rejected = (
+                df_snomed
+                .filter(pl.col("ai_overlap_verdict") == "remove")
+                .select("snomed_concept_id", "condition_name")
+                .unique()
+            )
+            n_before = len(df_all_pairs)
+            df_all_pairs = df_all_pairs.join(
+                df_overlap_rejected,
+                on=["snomed_concept_id", "condition_name"],
+                how="anti",
+            )
+            n_skipped_overlap = n_before - len(df_all_pairs)
+            if n_skipped_overlap > 0:
+                print(f"  Skipped {n_skipped_overlap} overlap-rejected pairs")
+
+        # ── Step 3: Load cache ────────────────────────────────────────
+        df_cached = pl.DataFrame(schema={
+            "snomed_concept_id": pl.Int64, "snomed_code": pl.Utf8,
+            "snomed_name": pl.Utf8, "condition_name": pl.Utf8,
+            "icd_codes": pl.Utf8, "ai_verdict": pl.Utf8,
+            "ai_comment": pl.Utf8, "ai_vote": pl.Utf8,
+            "ai_vote_confidence": pl.Utf8,
+            "ai_comment_consistency": pl.Int64,
+            "ai_comment_consistency_tier": pl.Utf8,
+            "ai_combined_confidence": pl.Utf8,
+        })
+
+        if cache_dir is not None:
+            cache_path = Path(cache_dir) / "snomed_mapping_cache.parquet"
+            if cache_path.exists():
+                df_cached = pl.read_parquet(str(cache_path))
+                n_before_cache = len(df_all_pairs)
+                df_all_pairs = df_all_pairs.join(
+                    df_cached.select("snomed_concept_id", "condition_name").unique(),
+                    on=["snomed_concept_id", "condition_name"],
+                    how="anti",
+                )
+                n_cached = n_before_cache - len(df_all_pairs)
+                print(f"  Cache: {n_cached} pairs loaded, "
+                      f"{len(df_all_pairs)} remaining")
+
+        # ── Step 4: Early exit ────────────────────────────────────────
+        _reviewed_schema = {
+            "snomed_concept_id": pl.Int64, "snomed_code": pl.Utf8,
+            "snomed_name": pl.Utf8, "condition_name": pl.Utf8,
+            "icd_codes": pl.Utf8, "ai_verdict": pl.Utf8,
+            "ai_comment": pl.Utf8, "ai_vote": pl.Utf8,
+            "ai_vote_confidence": pl.Utf8,
+            "ai_comment_consistency": pl.Int64,
+            "ai_comment_consistency_tier": pl.Utf8,
+            "ai_combined_confidence": pl.Utf8,
+        }
+
+        if len(df_all_pairs) == 0:
+            print("  No pairs to review (all cached or overlap-rejected).")
+            df_mapping_reviewed = (
+                df_cached if len(df_cached) > 0
+                else pl.DataFrame(schema=_reviewed_schema)
+            )
+            snomed_results = self._finalize_mapping_review(
+                snomed_results, df_mapping_reviewed,
+                export_tsv, export_prefix, model,
+            )
+            return snomed_results
+
+        # ── Step 5: Idempotency guard ─────────────────────────────────
+        if "ai_mapping_verdict" in df_snomed.columns:
+            df_snomed = df_snomed.drop("ai_mapping_verdict")
+            snomed_results["df_snomed"] = df_snomed
+
+        # ── Step 6: Batching ──────────────────────────────────────────
+        conditions_list = sorted(
+            df_all_pairs["condition_name"].unique().to_list()
+        )
+        batches = self._build_review_batches(df_all_pairs, conditions_list)
+
+        n_pairs = len(df_all_pairs)
+        n_batches = len(batches)
+        print(f"\n  SNOMED mapping pairs to review: {n_pairs}")
+        print(f"  Conditions: {len(conditions_list)}")
+        print(f"  Batches: {n_batches}")
+        print(f"  AI passes: {ai_passes}")
+        print(f"  Model: {model}")
+
+        # ── Step 7: Build prompts ─────────────────────────────────────
+        system_prompt = (
+            "You are a clinical terminologist reviewing SNOMED concept "
+            "mappings derived from ICD codes in an OMOP cohort definition.\n\n"
+            "For each (SNOMED concept, condition) pair, decide whether the "
+            "SNOMED concept is a valid representation of the condition:\n"
+            '- "accept" — exact match, direct synonym, clinical subtype, '
+            "or complication that retains the primary disease qualifier\n"
+            '- "reject" — generic anatomic/body-system concept (lost disease '
+            "specificity), unrelated disease mapped via shared ICD code, "
+            "complication that dropped the disease qualifier, or "
+            "lab test / finding / imaging term\n"
+            '- "human_review" — uncertain, needs clinical review\n\n'
+            "Respond with JSON matching this schema. "
+            "Comment: 2-5 word clinical rationale."
+        )
+
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "verdicts": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "snomed_id": {"type": "STRING"},
+                            "condition": {"type": "STRING"},
+                            "v": {"type": "STRING",
+                                   "enum": ["accept", "reject",
+                                            "human_review"]},
+                            "comment": {"type": "STRING"},
+                        },
+                        "required": ["snomed_id", "condition", "v",
+                                     "comment"],
+                    },
+                },
+            },
+            "required": ["verdicts"],
+        }
+
+        # Build batch data prompts grouped by condition
+        batch_prompts: list[str] = []
+        batch_items: list[list[dict]] = []
+        for batch_conds in batches:
+            data_lines: list[str] = []
+            items: list[dict] = []
+            for cond in batch_conds:
+                cond_rows = df_all_pairs.filter(
+                    pl.col("condition_name") == cond
+                )
+                if len(cond_rows) == 0:
+                    continue
+                data_lines.append(f"Condition: {cond}")
+                for row in cond_rows.iter_rows(named=True):
+                    data_lines.append(
+                        f'  SNOMED {row["snomed_concept_id"]} '
+                        f'"{row["snomed_name"]}" ({row["snomed_code"]}) '
+                        f'| icd_codes={row["icd_codes"]}'
+                    )
+                    items.append(row)
+                data_lines.append("")
+            batch_prompts.append("\n".join(data_lines))
+            batch_items.append(items)
+
+        # Show example
+        example_lines = batch_prompts[0].split("\n")[:8]
+        print(f"\n  Example prompt (first conditions):")
+        for line in example_lines:
+            print(f"    {line}")
+        if len(batch_prompts[0].split("\n")) > 8:
+            print(f"    ... ({len(batch_prompts[0].split(chr(10)))} "
+                  f"total lines)")
+
+        # ── Step 8: Multi-pass AI voting ──────────────────────────────
+        all_pass_results: list[list[dict]] = []
+
+        for pass_num in tqdm(range(1, ai_passes + 1),
+                             desc="  AI mapping review", unit="pass"):
+            pass_verdicts: list[dict] = []
+            for b_idx, data_prompt in enumerate(batch_prompts):
+                raw = None
+                for attempt in range(3):
+                    try:
+                        raw = self._call_ai(
+                            provider, data_prompt, model,
+                            system_prompt=system_prompt,
+                            response_schema=response_schema,
+                            temperature=0.0 if pass_num == 1 else 0.2,
+                        )
+                        break
+                    except Exception as e:
+                        if attempt < 2:
+                            if "timed out" in str(e):
+                                print(f"    Timeout, retrying "
+                                      f"({attempt + 1}/2)...")
+                                continue
+                            import time as _time
+                            _time.sleep(30 * (attempt + 1))
+                            continue
+                        # Primary exhausted — try fallback
+                        fallback = ("claude" if provider == "gemini"
+                                    else "gemini")
+                        if self._has_provider(fallback):
+                            print(f"  {provider} failed, "
+                                  f"trying {fallback}...")
+                            try:
+                                _, fb_model = self._resolve_model(
+                                    ai_provider=fallback,
+                                )
+                                raw = self._call_ai(
+                                    fallback, data_prompt, fb_model,
+                                    system_prompt=system_prompt,
+                                    response_schema=response_schema,
+                                    temperature=(0.0 if pass_num == 1
+                                                 else 0.2),
+                                )
+                            except Exception:
+                                print(f"  {fallback} also failed")
+                        if raw is None:
+                            raise
+
+                try:
+                    parsed = self._parse_ai_json(raw)
+                    verdicts = parsed.get("verdicts", [])
+                except (json.JSONDecodeError, AttributeError,
+                        TypeError, RuntimeError) as exc:
+                    print(f"    Warning: pass {pass_num} batch {b_idx} "
+                          f"unparseable: {exc}")
+                    verdicts = []
+
+                pass_verdicts.extend(verdicts)
+
+            print(f"    Received {len(pass_verdicts)} verdicts")
+            all_pass_results.append(pass_verdicts)
+
+        # ── Step 9: Vote tallying ─────────────────────────────────────
+        key_verdicts: dict[tuple, list[tuple[str, str]]] = {}
+        for pass_verdicts in all_pass_results:
+            for v in pass_verdicts:
+                try:
+                    sid = int(v["snomed_id"])
+                except (ValueError, KeyError):
+                    continue
+                cond = v.get("condition", "")
+                verdict = v.get("v", "human_review")
+                comment = v.get("comment", "")
+                key = (sid, cond)
+                key_verdicts.setdefault(key, []).append((verdict, comment))
+
+        vote_results: dict[tuple, dict] = {}
+        for key, vc_pairs in key_verdicts.items():
+            n_total = len(vc_pairs)
+            counts: dict[str, int] = {}
+            for verdict, _ in vc_pairs:
+                counts[verdict] = counts.get(verdict, 0) + 1
+
+            majority = max(counts, key=counts.get)
+            majority_count = counts[majority]
+
+            if n_total >= 2 and majority_count == n_total:
+                confidence = "strong"
+            elif n_total >= 2 and majority_count > n_total / 2:
+                confidence = "moderate"
+            else:
+                majority = "human_review"
+                confidence = "weak"
+
+            vote_str = f"{majority_count}/{n_total}"
+            majority_comments = [c for v, c in vc_pairs if v == majority]
+
+            vote_results[key] = {
+                "ai_verdict": majority,
+                "ai_vote": vote_str,
+                "ai_vote_confidence": confidence,
+                "comments": majority_comments,
+            }
+
+        # ── Step 10: Comment consistency + combined confidence ────────
+        comment_results = self._compute_comment_consistency(vote_results)
+        combined_results = self._compute_combined_confidence(
+            vote_results, comment_results,
+        )
+
+        # ── Step 11: Build df_mapping_reviewed ────────────────────────
+        all_items: list[dict] = []
+        for items in batch_items:
+            all_items.extend(items)
+        item_lookup = {
+            (it["snomed_concept_id"], it["condition_name"]): it
+            for it in all_items
+        }
+
+        reviewed_rows = []
+        for key, vr in vote_results.items():
+            sid, cond = key
+            meta = item_lookup.get(key, {})
+            cr = comment_results.get(key, {})
+            cc = combined_results.get(key, {})
+            reviewed_rows.append({
+                "snomed_concept_id": sid,
+                "snomed_code": meta.get("snomed_code", ""),
+                "snomed_name": meta.get("snomed_name", ""),
+                "condition_name": cond,
+                "icd_codes": meta.get("icd_codes", ""),
+                "ai_verdict": vr["ai_verdict"],
+                "ai_comment": cr.get("ai_comment", ""),
+                "ai_vote": vr["ai_vote"],
+                "ai_vote_confidence": vr["ai_vote_confidence"],
+                "ai_comment_consistency": cr.get(
+                    "ai_comment_consistency", 0),
+                "ai_comment_consistency_tier": cr.get(
+                    "ai_comment_consistency_tier", "low"),
+                "ai_combined_confidence": cc.get(
+                    "ai_combined_confidence", "inconclusive"),
+            })
+
+        df_mapping_reviewed = pl.DataFrame(
+            reviewed_rows, schema=_reviewed_schema,
+        )
+
+        # ── Step 12: Merge cached verdicts ────────────────────────────
+        if len(df_cached) > 0:
+            df_mapping_reviewed = pl.concat(
+                [df_mapping_reviewed, df_cached],
+                how="diagonal_relaxed",
+            ).unique(
+                subset=["snomed_concept_id", "condition_name"],
+                keep="first",
+            )
+
+        # ── Step 13: Save cache ───────────────────────────────────────
+        if cache_dir is not None:
+            cache_path = Path(cache_dir) / "snomed_mapping_cache.parquet"
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            df_mapping_reviewed.write_parquet(str(cache_path))
+            print(f"  Cache saved: {len(df_mapping_reviewed)} pairs "
+                  f"→ {cache_path}")
+
+        # ── Steps 14-17: Finalize ─────────────────────────────────────
+        snomed_results = self._finalize_mapping_review(
+            snomed_results, df_mapping_reviewed,
+            export_tsv, export_prefix, model,
+        )
+        return snomed_results
+
+    def _finalize_mapping_review(
+        self,
+        snomed_results: dict,
+        df_mapping_reviewed: pl.DataFrame,
+        export_tsv: bool,
+        export_prefix: str,
+        model: str,
+    ) -> dict:
+        """Join mapping verdicts onto df_snomed and build accepted set.
+
+        Shared by the main path and the early-exit (all-cached) path of
+        :meth:`review_snomed_mappings`.
+        """
+        df_snomed = snomed_results["df_snomed"]
+
+        # ── Step 14: Join ai_mapping_verdict onto df_snomed ───────────
+        if "ai_mapping_verdict" in df_snomed.columns:
+            df_snomed = df_snomed.drop("ai_mapping_verdict")
+
+        df_verdict_join = df_mapping_reviewed.select(
+            "snomed_concept_id", "condition_name", "ai_verdict",
+        ).rename({"ai_verdict": "ai_mapping_verdict"})
+
+        df_snomed = df_snomed.join(
+            df_verdict_join,
+            on=["snomed_concept_id", "condition_name"],
+            how="left",
+        )
+
+        snomed_results["df_snomed"] = df_snomed
+        snomed_results["df_mapping_reviewed"] = df_mapping_reviewed
+
+        # ── Step 15: Print summary ────────────────────────────────────
+        n_accept = len(df_mapping_reviewed.filter(
+            pl.col("ai_verdict") == "accept"))
+        n_reject = len(df_mapping_reviewed.filter(
+            pl.col("ai_verdict") == "reject"))
+        n_human = len(df_mapping_reviewed.filter(
+            pl.col("ai_verdict") == "human_review"))
+        n_strong = len(df_mapping_reviewed.filter(
+            pl.col("ai_vote_confidence") == "strong"))
+        n_weak = len(df_mapping_reviewed.filter(
+            pl.col("ai_vote_confidence") != "strong"))
+
+        print(f"\n{'=' * 40}")
+        print(f"  SNOMED MAPPING AI REVIEW")
+        print(f"{'=' * 40}")
+        print(f"  Model:               {model}")
+        print(f"  Pairs reviewed:      {len(df_mapping_reviewed)}")
+        print(f"    accept:            {n_accept}")
+        print(f"    reject:            {n_reject}")
+        print(f"    human_review:      {n_human}")
+        print(f"  Confidence: strong={n_strong}, weak={n_weak}")
+        print(f"{'=' * 40}")
+
+        # ── Step 16: Build df_snomed_accepted ─────────────────────────
+        # Exclude rejects from EITHER review
+        reject_filter = pl.lit(True)
+        if "ai_overlap_verdict" in df_snomed.columns:
+            reject_filter = reject_filter & (
+                pl.col("ai_overlap_verdict").is_null()
+                | (pl.col("ai_overlap_verdict") != "remove")
+            )
+        if "ai_mapping_verdict" in df_snomed.columns:
+            reject_filter = reject_filter & (
+                pl.col("ai_mapping_verdict").is_null()
+                | (pl.col("ai_mapping_verdict") != "reject")
+            )
+
+        df_snomed_clean = df_snomed.filter(reject_filter)
+
+        df_snomed_accepted = (
+            df_snomed_clean
+            .group_by("condition_name")
+            .agg(
+                pl.col("snomed_concept_id").unique().sort()
+                    .cast(pl.Utf8).str.concat(", ")
+                    .alias("snomed_concept_ids"),
+                pl.col("snomed_code").unique().sort()
+                    .str.concat(", ").alias("snomed_codes"),
+                pl.col("snomed_name").unique().sort()
+                    .str.concat(", ").alias("snomed_names"),
+                pl.col("snomed_concept_id").n_unique().alias("n_snomed"),
+            )
+            .sort("condition_name")
+        )
+
+        snomed_results["df_snomed_accepted"] = df_snomed_accepted
+
+        # ── Step 17: Export ───────────────────────────────────────────
+        if export_tsv:
+            write_tsv_bom(df_snomed, f"{export_prefix}_snomed_full.tsv")
+            write_tsv_bom(
+                df_snomed_accepted,
+                f"{export_prefix}_snomed_accepted.tsv",
+            )
+            write_tsv_bom(
+                df_mapping_reviewed,
+                f"{export_prefix}_snomed_mapping_reviewed.tsv",
+            )
+            print(f"\nExported:")
+            print(f"  {export_prefix}_snomed_full.tsv       "
+                  f"({len(df_snomed)} rows)")
+            print(f"  {export_prefix}_snomed_accepted.tsv   "
+                  f"({len(df_snomed_accepted)} conditions)")
+            print(f"  {export_prefix}_snomed_mapping_reviewed.tsv   "
+                  f"({len(df_mapping_reviewed)} pairs)")
+
+        return snomed_results
